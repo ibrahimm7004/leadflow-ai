@@ -1,0 +1,16 @@
+*.json
+!package.json
+!package-lock.json
+*.csv
+.env
+*.sqlite3
+node_modules/
+dist/
+*.log
+supabase-proj-pass.txt
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+local_scrape_runs/
+old-leads/
