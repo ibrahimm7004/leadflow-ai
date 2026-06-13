@@ -70,6 +70,10 @@ end $$;
 create index if not exists leads_date_ticked_reviews_idx
 on leads (lead_date desc, ticked asc, user_rating_count asc);
 
+create unique index if not exists leads_unique_place_global_idx
+on leads (place_id)
+where place_id is not null;
+
 create index if not exists leads_search_idx
 on leads using gin (
   to_tsvector('simple', coalesce(name, '') || ' ' || coalesce(address, '') || ' ' || coalesce(search_query, '') || ' ' || coalesce(best_email, ''))

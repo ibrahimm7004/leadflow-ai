@@ -286,6 +286,78 @@ def upsert_leads(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [to_app_row(row) for row in (result or [])]
 
 
+def find_existing_place_ids(place_ids: List[str]) -> set[str]:
+    ids = [str(place_id).strip() for place_id in place_ids if str(place_id or "").strip()]
+    if not ids:
+        return set()
+    safe = ",".join(f'"{place_id}"' for place_id in ids)
+    rows = _request("GET", "leads", params={"select": "place_id", "place_id": f"in.({safe})"}) or []
+    return {str(row.get("place_id") or "").strip() for row in rows if str(row.get("place_id") or "").strip()}
+
+
+def update_search_run(run_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+    rows = _request("PATCH", "search_runs", params={"id": f"eq.{run_id}"}, json_body=updates, prefer="return=representation") or []
+    if not rows:
+        raise HostedStoreError("Search run not found")
+    return rows[0]
+
+
+def latest_search_run(*, run_date: str = "", query: str = "") -> Optional[Dict[str, Any]]:
+    params: Dict[str, Any] = {
+        "select": "*",
+        "order": "created_at.desc",
+        "limit": 1,
+    }
+    if run_date:
+        params["run_date"] = f"eq.{run_date}"
+    if query:
+        params["search_query"] = f"eq.{query}"
+    rows = _request("GET", "search_runs", params=params) or []
+    return rows[0] if rows else None
+
+
+def search_progress(query: str) -> Dict[str, Any]:
+    run = latest_search_run(query=query)
+    meta = run.get("meta") if isinstance(run, dict) and isinstance(run.get("meta"), dict) else {}
+    previous_deepest = int(meta.get("deepestHistoricalPage") or meta.get("deepestPageReached") or meta.get("pages_fetched") or 0)
+    return {
+        "query": query,
+        "runId": run.get("id") if run else "",
+        "deepestHistoricalPage": previous_deepest,
+        "exhausted": bool(meta.get("exhausted")) if run else False,
+        "lastRunMeta": meta,
+        "lastRunAt": run.get("created_at") if run else "",
+    }
+
+
+def search_run_summary(row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not row:
+        return {}
+    meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+    return {
+        "id": row.get("id") or "",
+        "date": row.get("run_date") or "",
+        "query": row.get("search_query") or "",
+        "businessType": row.get("business_type") or "",
+        "location": row.get("search_location") or "",
+        "createdAt": row.get("created_at") or "",
+        "pagesFetched": int(meta.get("pages_fetched") or 0),
+        "requestsMade": int(meta.get("requests_made") or 0),
+        "candidatesFetched": int(meta.get("candidates_fetched") or 0),
+        "resultsReturned": int(meta.get("resultsReturned") or 0),
+        "storedCount": int(meta.get("storedCount") or 0),
+        "duplicatesRemoved": int(meta.get("duplicatesRemoved") or 0),
+        "previousDeepestPage": int(meta.get("previousDeepestPage") or 0),
+        "deepestPageReached": int(meta.get("deepestPageReached") or 0),
+        "deepestHistoricalPage": int(meta.get("deepestHistoricalPage") or 0),
+        "targetMaxPages": int(meta.get("targetMaxPages") or 0),
+        "resumeFromPage": int(meta.get("resumeFromPage") or 1),
+        "exhausted": bool(meta.get("exhausted")),
+        "pageResumeSupported": bool(meta.get("pageResumeSupported", False)),
+        "pageResumeNote": str(meta.get("pageResumeNote") or ""),
+    }
+
+
 def list_leads(
     *,
     lead_date: Optional[str] = None,
@@ -327,7 +399,16 @@ def list_leads(
     if max_reviews:
         params["user_rating_count"] = f"lte.{max_reviews}"
     rows = _request("GET", "leads", params=params) or []
-    return [to_app_row(row) for row in rows]
+    seen: set[str] = set()
+    deduped: List[Dict[str, Any]] = []
+    for row in rows:
+        place_id = str(row.get("place_id") or "").strip()
+        key = place_id or f"name:{str(row.get('name') or '').strip().lower()}|addr:{str(row.get('address') or '').strip().lower()}"
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(to_app_row(row))
+    return deduped
 
 
 def get_lead(lead_id: str) -> Dict[str, Any]:

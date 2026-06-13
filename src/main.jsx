@@ -143,22 +143,89 @@ function hrefFor(row, key) {
   return "";
 }
 
-function downloadCsv(rows) {
-  const headers = Array.from(new Set(rows.flatMap((row) => Object.keys(row))));
-  const csvEscape = (value) => {
-    const raw = value === null || value === undefined ? "" : typeof value === "object" ? JSON.stringify(value) : String(value);
-    return /[",\n\r]/.test(raw) ? `"${raw.replaceAll('"', '""')}"` : raw;
-  };
-  const csv = [headers.join(","), ...rows.map((row) => headers.map((key) => csvEscape(row[key])).join(","))].join("\n");
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+function downloadBlob(filename, content, type) {
+  const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = `leads-${new Date().toISOString().slice(0, 10)}.csv`;
+  link.download = filename;
   document.body.appendChild(link);
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+}
+
+function exportHeaders(rows) {
+  return Array.from(new Set(rows.flatMap((row) => Object.keys(row))));
+}
+
+function exportValue(value) {
+  return value === null || value === undefined ? "" : typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
+function csvEscape(value) {
+  const raw = exportValue(value);
+  return /[",\n\r]/.test(raw) ? `"${raw.replaceAll('"', '""')}"` : raw;
+}
+
+function sqlEscape(value) {
+  return exportValue(value).replaceAll("'", "''");
+}
+
+function exportBaseName() {
+  return `leads-${new Date().toISOString().slice(0, 10)}`;
+}
+
+function downloadCsv(rows) {
+  const headers = exportHeaders(rows);
+  const csv = [headers.join(","), ...rows.map((row) => headers.map((key) => csvEscape(row[key])).join(","))].join("\n");
+  downloadBlob(`${exportBaseName()}.csv`, csv, "text/csv;charset=utf-8");
+}
+
+function downloadJson(rows) {
+  downloadBlob(`${exportBaseName()}.json`, JSON.stringify(rows, null, 2), "application/json;charset=utf-8");
+}
+
+function downloadTxt(rows) {
+  const headers = exportHeaders(rows);
+  const txt = rows.map((row, index) => [`Lead ${index + 1}`, ...headers.map((key) => `${key}: ${exportValue(row[key])}`)].join("\n")).join("\n\n");
+  downloadBlob(`${exportBaseName()}.txt`, txt, "text/plain;charset=utf-8");
+}
+
+function downloadSql(rows) {
+  const headers = exportHeaders(rows);
+  const values = rows.map((row) => `(${headers.map((key) => `'${sqlEscape(row[key])}'`).join(", ")})`);
+  const sql = [
+    `create table if not exists exported_leads (${headers.map((key) => `"${key}" text`).join(", ")});`,
+    `insert into exported_leads (${headers.map((key) => `"${key}"`).join(", ")}) values`,
+    `${values.join(",\n")};`,
+  ].join("\n");
+  downloadBlob(`${exportBaseName()}.sql`, sql, "application/sql;charset=utf-8");
+}
+
+function excelCell(value) {
+  return exportValue(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function downloadExcel(rows) {
+  const headers = exportHeaders(rows);
+  const xml = `<?xml version="1.0"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:o="urn:schemas-microsoft-com:office:office"
+ xmlns:x="urn:schemas-microsoft-com:office:excel"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+ <Worksheet ss:Name="Leads">
+  <Table>
+   <Row>${headers.map((key) => `<Cell><Data ss:Type="String">${excelCell(key)}</Data></Cell>`).join("")}</Row>
+   ${rows.map((row) => `<Row>${headers.map((key) => `<Cell><Data ss:Type="String">${excelCell(row[key])}</Data></Cell>`).join("")}</Row>`).join("")}
+  </Table>
+ </Worksheet>
+</Workbook>`;
+  downloadBlob(`${exportBaseName()}.xls`, xml, "application/vnd.ms-excel");
 }
 
 function Metric({ label, value, tone = "" }) {
@@ -420,6 +487,47 @@ function SelectedDayEditor({ dateKey, config, inherited, onChange, onClose, onCl
   );
 }
 
+function DefaultSearchEditor({ config, weekendsOff, onChange, onKeepWeekendsOff, onAllowWeekends, onClose }) {
+  return (
+    <motion.div className="calendar-popover-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+      <motion.aside className="calendar-popover default-search-popover" initial={{ opacity: 0, y: 18, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 18, scale: 0.98 }}>
+        <header>
+          <div>
+            <span>Default search</span>
+            <h2>{config.businessType} in {config.location}</h2>
+          </div>
+          <button onClick={onClose} aria-label="Close default search editor">
+            <X size={20} />
+          </button>
+        </header>
+        <div className="day-toggle-row">
+          <button className={config.enabled ? "toggle is-on" : "toggle"} onClick={() => onChange({ ...config, enabled: !config.enabled })}>
+            {config.enabled ? "Search enabled" : "Search off"}
+          </button>
+          <span>{weekendsOff ? "Weekends off by default" : "Weekends allowed"}</span>
+        </div>
+        <div className="default-stats">
+          <span>{config.numLeads} leads</span>
+          <span>{config.minRating}+ stars</span>
+          <span>{config.maxUserReviews} max reviews</span>
+        </div>
+        <SearchConfigFields value={config} onChange={onChange} />
+        <div className="quick-actions">
+          <button className={weekendsOff ? "is-selected" : ""} onClick={onKeepWeekendsOff}>Keep weekends off</button>
+          <button className={!weekendsOff ? "is-selected" : ""} onClick={onAllowWeekends}>Allow weekends</button>
+        </div>
+        <footer>
+          <span className="popover-note">Applies to every unedited day.</span>
+          <button className="dark" onClick={onClose}>
+            <Check size={18} />
+            Done
+          </button>
+        </footer>
+      </motion.aside>
+    </motion.div>
+  );
+}
+
 function TodayPage({ bootstrap, settings, setSettings }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -428,6 +536,7 @@ function TodayPage({ bootstrap, settings, setSettings }) {
   const [enriching, setEnriching] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0, found: 0, ai: 0, pages: 0 });
   const [debugRow, setDebugRow] = useState(null);
+  const [runSummary, setRunSummary] = useState(bootstrap?.latestRun || {});
   const visibleColumns = settings.visibleColumns?.length ? settings.visibleColumns : DEFAULT_COLUMNS;
 
   const loadToday = async () => {
@@ -436,6 +545,7 @@ function TodayPage({ bootstrap, settings, setSettings }) {
     try {
       const data = await api("/api/app/leads/today");
       setRows(data.rows || []);
+      setRunSummary(data.runSummary || {});
     } catch (err) {
       setError(err.message);
     } finally {
@@ -447,6 +557,12 @@ function TodayPage({ bootstrap, settings, setSettings }) {
     if (bootstrap?.hostedDb?.configured) loadToday();
     else setLoading(false);
   }, [bootstrap?.hostedDb?.configured]);
+
+  useEffect(() => {
+    if (bootstrap?.latestRun) {
+      setRunSummary(bootstrap.latestRun);
+    }
+  }, [bootstrap?.latestRun]);
 
   const sortedRows = useMemo(
     () => [...rows].sort((a, b) => Number(a.ticked) - Number(b.ticked) || Number(a.userRatingCount || 0) - Number(b.userRatingCount || 0)),
@@ -478,7 +594,8 @@ function TodayPage({ bootstrap, settings, setSettings }) {
     setLoading(true);
     setError("");
     try {
-      await api("/api/app/run-daily", { method: "POST", body: JSON.stringify({ notify: false }) });
+      const data = await api("/api/app/run-daily", { method: "POST", body: JSON.stringify({ notify: false }) });
+      setRunSummary(data.runSummary || {});
       await loadToday();
     } catch (err) {
       setError(err.message);
@@ -525,7 +642,7 @@ function TodayPage({ bootstrap, settings, setSettings }) {
       <section className="hero-workspace">
         <div>
           <p className="eyebrow">Today's Leads</p>
-          <h1>Work the freshest local opportunities first.</h1>
+          <h1>Today's outreach queue.</h1>
           <p className="hero-subcopy">Daily Places results land here at 5 AM EST, sorted by lower review counts so the most likely website-upgrade opportunities stay near the top.</p>
         </div>
         <div className="hero-actions">
@@ -546,6 +663,27 @@ function TodayPage({ bootstrap, settings, setSettings }) {
         <Metric label="Emails found" value={`${emailed}/${rows.length}`} />
         <Metric label="Today" value={bootstrap?.today || new Date().toISOString().slice(0, 10)} />
       </section>
+
+      {!!runSummary?.query && (
+        <section className="run-summary-band">
+          <div>
+            <span>Latest run</span>
+            <strong>{runSummary.query}</strong>
+          </div>
+          <div>
+            <span>Duplicates removed</span>
+            <strong>{runSummary.duplicatesRemoved || 0}</strong>
+          </div>
+          <div>
+            <span>Page depth</span>
+            <strong>{`${runSummary.resumeFromPage || 1}-${runSummary.deepestPageReached || 0}`}</strong>
+          </div>
+          <div>
+            <span>Deepest reached</span>
+            <strong>{runSummary.deepestHistoricalPage || 0}</strong>
+          </div>
+        </section>
+      )}
 
       <section className="control-band">
         <div>
@@ -582,7 +720,7 @@ function TodayPage({ bootstrap, settings, setSettings }) {
           <div className="empty-state">
             <Clock3 size={28} />
             <strong>No leads for today yet</strong>
-            <p>Use Run now after Supabase is connected, or wait for the 5 AM automation.</p>
+            <p>Use Run now to fetch today&apos;s leads, or wait for the 5 AM automation.</p>
           </div>
         )}
       </section>
@@ -599,7 +737,11 @@ function AllLeadsPage({ settings }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [debugRow, setDebugRow] = useState(null);
+  const [downloadOpen, setDownloadOpen] = useState(false);
   const visibleColumns = settings.visibleColumns?.length ? settings.visibleColumns : DEFAULT_COLUMNS;
+  const activeCount = rows.filter((row) => !row.ticked).length;
+  const tickedCount = rows.length - activeCount;
+  const emailCount = rows.filter((row) => row.bestEmail).length;
 
   const load = async () => {
     setLoading(true);
@@ -621,66 +763,120 @@ function AllLeadsPage({ settings }) {
 
   const set = (key, value) => setFilters((current) => ({ ...current, [key]: value }));
 
+  const tickLead = async (row) => {
+    const nextTicked = !row.ticked;
+    setRows((current) =>
+      current.map((item) =>
+        item.id === row.id
+          ? { ...item, ticked: nextTicked, tickedAt: nextTicked ? new Date().toISOString() : "" }
+          : item,
+      ),
+    );
+    try {
+      const data = await api(`/api/app/leads/${row.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ ticked: nextTicked }),
+      });
+      setRows((current) => current.map((item) => (item.id === row.id ? data.row : item)));
+    } catch (err) {
+      setError(err.message);
+      setRows((current) => current.map((item) => (item.id === row.id ? row : item)));
+    }
+  };
+
   return (
     <motion.main className="page" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -12 }}>
-      <section className="page-heading">
+      <section className="archive-hero">
         <div>
           <p className="eyebrow">All Leads</p>
-          <h1>Filter the full hosted database.</h1>
+          <h1>Lead archive.</h1>
+          <p className="hero-subcopy">Search by business, date, status, or enrichment state. The archive stays compact while the cards handle the detailed display.</p>
         </div>
-        <button onClick={() => downloadCsv(rows)} disabled={!rows.length}>
-          <Download size={18} />
-          CSV
-        </button>
+        <div className="archive-hero-actions">
+          <button onClick={load} disabled={loading}>
+            {loading ? <Loader2 className="spin" size={18} /> : <RefreshCw size={18} />}
+            Refresh
+          </button>
+          <div className="download-menu-wrap">
+            <button className="dark" onClick={() => setDownloadOpen((current) => !current)} disabled={!rows.length}>
+              <Download size={18} />
+              Download
+            </button>
+            <AnimatePresence>
+              {downloadOpen && (
+                <motion.div className="download-menu" initial={{ opacity: 0, y: 10, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 10, scale: 0.98 }}>
+                  <button onClick={() => { downloadCsv(rows); setDownloadOpen(false); }}>CSV</button>
+                  <button onClick={() => { downloadExcel(rows); setDownloadOpen(false); }}>Excel</button>
+                  <button onClick={() => { downloadJson(rows); setDownloadOpen(false); }}>JSON</button>
+                  <button onClick={() => { downloadTxt(rows); setDownloadOpen(false); }}>TXT</button>
+                  <button onClick={() => { downloadSql(rows); setDownloadOpen(false); }}>SQL</button>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        </div>
       </section>
 
-      <section className="filter-grid">
-        <label>
-          <span>Search</span>
-          <input value={filters.q} onChange={(event) => set("q", event.target.value)} placeholder="business, address, email" />
-        </label>
-        <label>
-          <span>From</span>
-          <input type="date" value={filters.dateFrom} onChange={(event) => set("dateFrom", event.target.value)} />
-        </label>
-        <label>
-          <span>To</span>
-          <input type="date" value={filters.dateTo} onChange={(event) => set("dateTo", event.target.value)} />
-        </label>
-        <label>
-          <span>Status</span>
-          <select value={filters.ticked} onChange={(event) => set("ticked", event.target.value)}>
-            <option value="">Any</option>
-            <option value="false">Active</option>
-            <option value="true">Ticked</option>
-          </select>
-        </label>
-        <label>
-          <span>Email</span>
-          <select value={filters.hasEmail} onChange={(event) => set("hasEmail", event.target.value)}>
-            <option value="">Any</option>
-            <option value="true">Has email</option>
-            <option value="false">No email</option>
-          </select>
-        </label>
-        <label>
-          <span>Min rating</span>
-          <input value={filters.minRating} onChange={(event) => set("minRating", event.target.value)} placeholder="3.5" />
-        </label>
-        <label>
-          <span>Max reviews</span>
-          <input value={filters.maxReviews} onChange={(event) => set("maxReviews", event.target.value)} placeholder="300" />
-        </label>
-        <button className="dark" onClick={load}>
-          {loading ? <Loader2 className="spin" size={18} /> : <Filter size={18} />}
-          Apply
-        </button>
+      <section className="archive-stats">
+        <Metric label="Total" value={rows.length} />
+        <Metric label="Active" value={activeCount} tone="hot" />
+        <Metric label="Ticked" value={tickedCount} />
+        <Metric label="Emails" value={emailCount} />
+      </section>
+
+      <section className="archive-filter-panel">
+        <div className="archive-filter-row archive-filter-row-main">
+          <label className="archive-search">
+            <span>Search</span>
+            <input value={filters.q} onChange={(event) => set("q", event.target.value)} placeholder="business, address, email" />
+          </label>
+          <label>
+            <span>From</span>
+            <input type="date" value={filters.dateFrom} onChange={(event) => set("dateFrom", event.target.value)} />
+          </label>
+          <label>
+            <span>To</span>
+            <input type="date" value={filters.dateTo} onChange={(event) => set("dateTo", event.target.value)} />
+          </label>
+          <div className="archive-actions-inline">
+            <button className="dark" onClick={load}>
+              {loading ? <Loader2 className="spin" size={18} /> : <Filter size={18} />}
+              Apply
+            </button>
+          </div>
+        </div>
+        <div className="archive-filter-row archive-filter-row-secondary">
+          <label>
+            <span>Status</span>
+            <select value={filters.ticked} onChange={(event) => set("ticked", event.target.value)}>
+              <option value="">Any</option>
+              <option value="false">Active</option>
+              <option value="true">Ticked</option>
+            </select>
+          </label>
+          <label>
+            <span>Email</span>
+            <select value={filters.hasEmail} onChange={(event) => set("hasEmail", event.target.value)}>
+              <option value="">Any</option>
+              <option value="true">Has email</option>
+              <option value="false">No email</option>
+            </select>
+          </label>
+          <label>
+            <span>Min rating</span>
+            <input value={filters.minRating} onChange={(event) => set("minRating", event.target.value)} placeholder="3.5" />
+          </label>
+          <label>
+            <span>Max reviews</span>
+            <input value={filters.maxReviews} onChange={(event) => set("maxReviews", event.target.value)} placeholder="300" />
+          </label>
+        </div>
       </section>
 
       {error && <p className="error-line">{error}</p>}
       <section className="lead-list">
         {rows.map((row) => (
-          <LeadRow key={row.id} row={row} visibleColumns={visibleColumns} onTick={() => {}} onDebug={setDebugRow} />
+          <LeadRow key={row.id} row={row} visibleColumns={visibleColumns} onTick={tickLead} onDebug={setDebugRow} />
         ))}
       </section>
       <AnimatePresence>
@@ -695,6 +891,8 @@ function SettingsPage({ settings, setSettings }) {
   const [message, setMessage] = useState("");
   const [calendarMonth, setCalendarMonth] = useState(new Date());
   const [selectedDate, setSelectedDate] = useState("");
+  const [calendarOpen, setCalendarOpen] = useState(false);
+  const [defaultEditorOpen, setDefaultEditorOpen] = useState(false);
   const defaultSearch = normalizeSearchConfig(settings.defaultSearch || DEFAULT_SEARCH);
   const overrides = settings.calendarOverrides && typeof settings.calendarOverrides === "object" ? settings.calendarOverrides : {};
 
@@ -755,13 +953,15 @@ function SettingsPage({ settings, setSettings }) {
   const allowWeekends = () => setSettings({ ...settings, weekendsOff: false });
   const cells = calendarCells(calendarMonth);
   const todayKey = localDateKey(new Date());
+  const previewCells = cells.slice(0, 14);
+  const nextActiveDay = cells.find((date) => configForDate(localDateKey(date)).enabled);
 
   return (
     <motion.main className="page" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -12 }}>
       <section className="page-heading">
         <div>
           <p className="eyebrow">Settings</p>
-          <h1>Control the daily search plan.</h1>
+          <h1>Search settings.</h1>
         </div>
         <button className="dark" onClick={saveAll} disabled={saving}>
           {saving ? <Loader2 className="spin" size={18} /> : <Check size={18} />}
@@ -775,21 +975,23 @@ function SettingsPage({ settings, setSettings }) {
           <CalendarDays size={20} />
           <div>
             <strong>Search calendar</strong>
-            <span>Unedited days inherit the default search. Click a date to override or disable that exact day.</span>
+            <span>Compact previews stay visible here. Open either surface when you need the full editor.</span>
           </div>
         </div>
-        <div className="calendar-workspace">
-          <article className="calendar-panel">
-            <header className="calendar-header">
-              <button onClick={() => setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() - 1, 1))}>Prev</button>
-              <strong>{monthLabel(calendarMonth)}</strong>
-              <button onClick={() => setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 1))}>Next</button>
-            </header>
-            <div className="calendar-weekdays">
-              {DAY_NAMES.map((day) => <span key={day}>{day}</span>)}
+        <div className="settings-feature-grid">
+          <article className="settings-preview-card calendar-preview-card">
+            <div className="settings-preview-head">
+              <div>
+                <span>Calendar</span>
+                <strong>{monthLabel(calendarMonth)}</strong>
+              </div>
+              <button onClick={() => setCalendarOpen(true)}>Open</button>
             </div>
-            <div className="calendar-grid">
-              {cells.map((date) => {
+            <div className="calendar-mini-weekdays">
+              {DAY_NAMES.map((day) => <span key={day}>{day.slice(0, 1)}</span>)}
+            </div>
+            <div className="calendar-mini-grid">
+              {previewCells.map((date) => {
                 const key = localDateKey(date);
                 const isCurrentMonth = date.getMonth() === calendarMonth.getMonth();
                 const hasOverride = Boolean(overrides[key]);
@@ -797,40 +999,104 @@ function SettingsPage({ settings, setSettings }) {
                 return (
                   <button
                     key={key}
-                    className={cls("calendar-day", !isCurrentMonth && "is-muted", key === todayKey && "is-today", hasOverride && "has-override", !config.enabled && "is-off")}
-                    onClick={() => setSelectedDate(key)}
+                    className={cls("calendar-mini-day", !isCurrentMonth && "is-muted", key === todayKey && "is-today", hasOverride && "has-override", !config.enabled && "is-off")}
+                    onClick={() => {
+                      setCalendarOpen(true);
+                      setSelectedDate(key);
+                    }}
                   >
-                    <strong>{date.getDate()}</strong>
-                    <span>{config.enabled ? `${config.businessType} · ${config.numLeads}` : "Off"}</span>
+                    {date.getDate()}
                   </button>
                 );
               })}
             </div>
+            <div className="settings-preview-meta">
+              <span>{Object.keys(overrides).length} overrides</span>
+              <span>{settings.weekendsOff ? "Weekends off" : "Weekends live"}</span>
+              <span>{nextActiveDay ? `Next live day ${nextActiveDay.getDate()}` : "No active days"}</span>
+            </div>
           </article>
 
-          <article className="default-widget">
-            <div className="default-widget-header">
+          <article className="settings-preview-card default-search-preview">
+            <div className="settings-preview-head">
               <div>
                 <span>Default search</span>
                 <strong>{defaultSearch.businessType} in {defaultSearch.location}</strong>
               </div>
-              <button className={defaultSearch.enabled ? "toggle is-on" : "toggle"} onClick={() => setDefaultSearch({ ...defaultSearch, enabled: !defaultSearch.enabled })}>
-                {defaultSearch.enabled ? "On" : "Off"}
-              </button>
+              <button onClick={() => setDefaultEditorOpen(true)}>Open</button>
             </div>
             <div className="default-stats">
               <span>{defaultSearch.numLeads} leads</span>
               <span>{defaultSearch.minRating}+ stars</span>
               <span>{defaultSearch.maxUserReviews} max reviews</span>
             </div>
-            <SearchConfigFields value={defaultSearch} onChange={setDefaultSearch} compact />
-            <div className="quick-actions">
-              <button className={settings.weekendsOff ? "is-selected" : ""} onClick={keepWeekendsOff}>Keep weekends off</button>
-              <button onClick={allowWeekends}>Allow weekends</button>
+            <div className="settings-preview-body">
+              <p>{defaultSearch.searchMode === "qualified_no_website" ? "Only businesses without owned websites" : "All businesses in the selected market"}</p>
+              <div className="settings-preview-chips">
+                <strong className={defaultSearch.enabled ? "ready" : ""}>{defaultSearch.enabled ? "Search on" : "Search off"}</strong>
+                <strong>{settings.weekendsOff ? "Weekends off" : "Weekends on"}</strong>
+              </div>
             </div>
           </article>
         </div>
       </section>
+
+      <AnimatePresence>
+        {calendarOpen && (
+          <motion.div className="calendar-popover-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <motion.aside className="calendar-popover calendar-browser-popover" initial={{ opacity: 0, y: 18, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 18, scale: 0.98 }}>
+              <header>
+                <div>
+                  <span>Search calendar</span>
+                  <h2>{monthLabel(calendarMonth)}</h2>
+                </div>
+                <button onClick={() => setCalendarOpen(false)} aria-label="Close calendar browser">
+                  <X size={20} />
+                </button>
+              </header>
+              <div className="calendar-browser-toolbar">
+                <button onClick={() => setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() - 1, 1))}>Prev</button>
+                <button onClick={() => setCalendarMonth(new Date())}>Today</button>
+                <button onClick={() => setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 1))}>Next</button>
+              </div>
+              <div className="calendar-weekdays">
+                {DAY_NAMES.map((day) => <span key={day}>{day}</span>)}
+              </div>
+              <div className="calendar-grid">
+                {cells.map((date) => {
+                  const key = localDateKey(date);
+                  const isCurrentMonth = date.getMonth() === calendarMonth.getMonth();
+                  const hasOverride = Boolean(overrides[key]);
+                  const config = configForDate(key);
+                  return (
+                    <button
+                      key={key}
+                      className={cls("calendar-day", !isCurrentMonth && "is-muted", key === todayKey && "is-today", hasOverride && "has-override", !config.enabled && "is-off")}
+                      onClick={() => setSelectedDate(key)}
+                    >
+                      <strong>{date.getDate()}</strong>
+                      <span>{config.enabled ? `${config.businessType} ? ${config.numLeads}` : "Off"}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </motion.aside>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {defaultEditorOpen && (
+          <DefaultSearchEditor
+            config={defaultSearch}
+            weekendsOff={settings.weekendsOff}
+            onChange={setDefaultSearch}
+            onKeepWeekendsOff={keepWeekendsOff}
+            onAllowWeekends={allowWeekends}
+            onClose={() => setDefaultEditorOpen(false)}
+          />
+        )}
+      </AnimatePresence>
 
       <AnimatePresence>
         {selectedDate && (
@@ -886,7 +1152,6 @@ function SettingsPage({ settings, setSettings }) {
     </motion.main>
   );
 }
-
 function App() {
   const [page, setPage] = useState("today");
   const [bootstrap, setBootstrap] = useState(null);

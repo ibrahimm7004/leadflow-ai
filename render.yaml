@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: leadflow-api
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m uvicorn leadgen.web_api:app --host 0.0.0.0 --port $PORT
+    autoDeploy: true
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: RUN_IN_PROCESS_SCHEDULER
+        value: "false"
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+
+  - type: cron
+    name: leadflow-daily-job
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    schedule: "0 * * * *"
+    startCommand: python -m leadgen.run_daily_job --require-new-york-hour 5
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: RUN_IN_PROCESS_SCHEDULER
+        value: "false"
+      - key: PYTHON_VERSION
+        value: "3.11.9"

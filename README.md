@@ -1,10 +1,10 @@
 # LeadFlow
 
-LeadFlow is a local FastAPI + React app for daily Google Places lead discovery, Supabase-hosted lead storage, and optional email enrichment.
+LeadFlow is a FastAPI + React app for daily Google Places lead discovery, Supabase-hosted lead storage, and optional email enrichment.
 
 ## What It Does
 
-- Runs a scheduled Google Places search at 5:00 AM America/New_York when the backend is running.
+- Runs a daily Google Places search at 5:00 AM America/New_York via a cron-safe backend job.
 - Stores daily leads in Supabase.
 - Shows a mobile-first `Today's Leads` workflow where leads can be ticked off after outreach.
 - Provides an `All Leads` archive with filters.
@@ -37,17 +37,17 @@ OPENAI_MODEL=gpt-5.5
 
 SUPABASE_URL=...
 SUPABASE_SERVICE_ROLE_KEY=...
-ENABLE_DAILY_AUTOMATION=true
+APP_ENV=development
+RUN_IN_PROCESS_SCHEDULER=true
 
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=ibrahim.m7004@gmail.com
-SMTP_PASSWORD=...
-SMTP_FROM=ibrahim.m7004@gmail.com
-SMTP_USE_TLS=true
+RESEND_API_KEY=...
+RESEND_FROM_EMAIL=...
+
+ALLOWED_ORIGINS=http://127.0.0.1:5173,http://localhost:5173
 ```
 
 Do not expose `SUPABASE_SERVICE_ROLE_KEY` in frontend env vars. The browser talks to FastAPI only.
+In production, set `VITE_API_BASE_URL` in Vercel to the Render backend URL.
 
 ## Supabase
 
@@ -99,8 +99,19 @@ Invoke-RestMethod http://127.0.0.1:8000/api/config-status
 Run the daily job manually without email notification:
 
 ```powershell
-$body = @{ notify = $false } | ConvertTo-Json
-Invoke-RestMethod -Uri http://127.0.0.1:8000/api/app/run-daily -Method Post -ContentType 'application/json' -Body $body
+python -m leadgen.run_daily_job --no-notify
+```
+
+Run the daily job for a specific date:
+
+```powershell
+python -m leadgen.run_daily_job --date 2026-06-12
+```
+
+Production cron-safe execution:
+
+```powershell
+python -m leadgen.run_daily_job --require-new-york-hour 5
 ```
 
 ## Tests
@@ -113,6 +124,7 @@ npm run build
 ## Important Files
 
 - `leadgen/web_api.py` - FastAPI API, Places orchestration, enrichment endpoints, scheduler.
+- `leadgen/run_daily_job.py` - cron-safe one-shot daily job entrypoint.
 - `leadgen/hosted_store.py` - Supabase REST storage layer.
 - `leadgen/places.py` - Google Places paging and result collection.
 - `leadgen/local_scrape_suite.py` - local website crawling/email evidence extraction.
@@ -120,3 +132,5 @@ npm run build
 - `src/main.jsx` - React app.
 - `src/styles.css` - responsive app styling.
 - `supabase_schema.sql` - hosted DB schema.
+- `render.yaml` - Render web service + cron deployment config.
+- `vercel.json` - Vercel frontend build config.

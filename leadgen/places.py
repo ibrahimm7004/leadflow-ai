@@ -72,6 +72,7 @@ def build_results(
     is_excluded_website_fn=None,
     score_place_fn=None,
     extract_place_id_fn=None,
+    existing_place_ids_fn=None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
     leads_new: List[Dict[str, Any]] = []
     details_new: List[Dict[str, Any]] = []
@@ -97,6 +98,14 @@ def build_results(
         details_valid_ids: List[str] = []
         leads_dup_count = 0
         details_dup_count = 0
+        page_place_ids = []
+
+        for place in places:
+            place_id = extract_place_id_fn(place) if extract_place_id_fn else ""
+            if place_id:
+                page_place_ids.append(place_id)
+
+        existing_place_ids = existing_place_ids_fn(page_place_ids) if existing_place_ids_fn else set()
 
         for place in places:
             place_id = extract_place_id_fn(place) if extract_place_id_fn else ""
@@ -104,7 +113,7 @@ def build_results(
                 continue
             place["_place_id"] = place_id
 
-            if place_id in details_seen_ids or place_id in details_ids_in_run:
+            if place_id in existing_place_ids or place_id in details_seen_ids or place_id in details_ids_in_run:
                 details_dup_count += 1
             else:
                 details_ids_in_run.add(place_id)
@@ -115,7 +124,7 @@ def build_results(
                 continue
 
             if is_excluded_website_fn and is_excluded_website_fn(place.get("websiteUri")):
-                if place_id in leads_seen_ids or place_id in leads_ids_in_run:
+                if place_id in existing_place_ids or place_id in leads_seen_ids or place_id in leads_ids_in_run:
                     leads_dup_count += 1
                 else:
                     if score_place_fn:
@@ -157,5 +166,6 @@ def build_results(
         "end_next_page_token": next_token,
         "exhausted": (not next_token) or (pages_fetched == 0),
         "per_page": per_page,
+        "duplicates_removed": sum(int(page.get("leads_duplicates_skipped_count") or 0) for page in per_page),
     }
     return leads_new, details_new, meta

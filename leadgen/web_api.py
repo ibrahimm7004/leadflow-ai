@@ -61,12 +61,37 @@ from .notifier import send_daily_ready_email
 
 load_project_env()
 
+
+def _allowed_origins() -> List[str]:
+    raw = get_project_env("ALLOWED_ORIGINS")
+    if not raw:
+        return []
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
+def _allow_origin_regex() -> Optional[str]:
+    if _allowed_origins():
+        return None
+    return r"http://(localhost|127\.0\.0\.1):\d+"
+
+
+def _scheduler_enabled() -> bool:
+    in_process = get_project_env("RUN_IN_PROCESS_SCHEDULER", "").strip().lower() == "true"
+    legacy = get_project_env("ENABLE_DAILY_AUTOMATION", "false").strip().lower() == "true"
+    app_env = get_project_env("APP_ENV", "").strip().lower()
+    if in_process:
+        return True
+    if legacy and app_env != "production":
+        return True
+    return False
+
 WEB_SEARCH_PROMPT_TEMPLATE = """For the business {business} find the best possible email to reach out to for a pitch. {website_instruction}I want you to look for provided emails and people, and decide which single person would be the best for reaching out to make a pitch to improve the business's website; I found some flaws in the website and want to reach out to a real person or the next best bet, so I can help them improve their business! It is typically best to reach out to the owner, manager, ceo, but if you find a better fit for this specific business to email, let me know. Return the single best email address only; ensure the email is one provided within the info and not an erroneous or dummy one. If absolutely no email exists, return nothing."""
 
 app = FastAPI(title="Leads Generator API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
+    allow_origins=_allowed_origins(),
+    allow_origin_regex=_allow_origin_regex(),
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -380,13 +405,21 @@ def _execute_search(payload: SearchRequest) -> Dict[str, Any]:
     query = f"{payload.businessType} in {payload.location}"
     qualified_mode = payload.searchMode == "qualified_no_website"
     include_fn = is_excluded_website if qualified_mode else (lambda _url: True)
+    base_max_pages = _max_pages(payload)
+    progress = hosted_store.search_progress(query) if hosted_store.configured() else {}
+    previous_deepest_page = int(progress.get("deepestHistoricalPage") or 0)
+    previous_exhausted = bool(progress.get("exhausted")) if progress else False
+    target_max_pages = base_max_pages
+    if previous_deepest_page and not previous_exhausted:
+        target_max_pages = min(50, max(base_max_pages, previous_deepest_page + base_max_pages))
+    resume_from_page = previous_deepest_page + 1 if previous_deepest_page and not previous_exhausted else 1
 
     try:
         leads, details, meta = build_results(
             _api_key(),
             query,
             payload.numLeads,
-            _max_pages(payload),
+            target_max_pages,
             set(),
             set(),
             search_params=_search_params(payload),
@@ -394,6 +427,7 @@ def _execute_search(payload: SearchRequest) -> Dict[str, Any]:
             is_excluded_website_fn=include_fn,
             score_place_fn=score_place,
             extract_place_id_fn=extract_place_id,
+            existing_place_ids_fn=hosted_store.find_existing_place_ids if hosted_store.configured() else None,
         )
     except PlacesApiError as exc:
         raise HTTPException(
@@ -457,7 +491,16 @@ def _execute_search(payload: SearchRequest) -> Dict[str, Any]:
             **meta,
             "detailsReturned": len(details),
             "resultsReturned": len(results),
-            "maxPagesUsed": _max_pages(payload),
+            "maxPagesUsed": target_max_pages,
+            "baseMaxPages": base_max_pages,
+            "targetMaxPages": target_max_pages,
+            "previousDeepestPage": previous_deepest_page,
+            "resumeFromPage": resume_from_page,
+            "deepestPageReached": int(meta.get("pages_fetched") or 0),
+            "deepestHistoricalPage": max(previous_deepest_page, int(meta.get("pages_fetched") or 0)),
+            "duplicatesRemoved": int(meta.get("duplicates_removed") or 0),
+            "pageResumeSupported": False,
+            "pageResumeNote": "Google Places page tokens cannot be resumed across runs. Earlier pages are re-queried and previously stored businesses are removed before storage and display.",
             "storedRunId": local_run_id,
         },
     }
@@ -489,7 +532,11 @@ def _hosted_payload_for_result(search_data: Dict[str, Any], run_date: str) -> Di
         for row in search_data.get("results", [])
     ]
     stored = hosted_store.upsert_leads(rows)
-    return {"run": run, "stored": stored}
+    meta = dict(search_data.get("meta") or {})
+    meta["storedCount"] = len(stored)
+    if run_id:
+        run = hosted_store.update_search_run(run_id, {"meta": meta})
+    return {"run": run, "stored": stored, "runSummary": hosted_store.search_run_summary(run)}
 
 
 def _today_est() -> date:
@@ -534,10 +581,12 @@ def app_bootstrap() -> Dict[str, Any]:
     db_status = hosted_store.status()
     settings = dict(hosted_store.DEFAULT_SETTINGS)
     schedule = hosted_store.DEFAULT_SCHEDULE
+    latest_run: Dict[str, Any] = {}
     if db_status["configured"]:
         try:
             settings = hosted_store.get_settings()
             schedule = hosted_store.get_schedule()
+            latest_run = hosted_store.search_run_summary(hosted_store.latest_search_run(run_date=_today_est().isoformat()))
         except HostedStoreError as exc:
             return {
                 "hostedDb": db_status,
@@ -550,6 +599,7 @@ def app_bootstrap() -> Dict[str, Any]:
         "settings": settings,
         "schedule": schedule,
         "today": _today_est().isoformat(),
+        "latestRun": latest_run,
     }
 
 
@@ -558,7 +608,8 @@ def app_today_leads() -> Dict[str, Any]:
     try:
         today = _today_est().isoformat()
         rows = hosted_store.list_leads(lead_date=today, limit=500)
-        return {"date": today, "rows": rows}
+        latest_run = hosted_store.latest_search_run(run_date=today)
+        return {"date": today, "rows": rows, "runSummary": hosted_store.search_run_summary(latest_run)}
     except HostedStoreError as exc:
         raise _hosted_error(exc) from exc
 
@@ -688,6 +739,7 @@ def run_daily_lead_job(run_date_value: Optional[str] = None, notify: bool = True
         "meta": search_data.get("meta"),
         "storedCount": len(stored["stored"]),
         "rows": stored["stored"],
+        "runSummary": stored.get("runSummary") or {},
         "notification": notification,
     }
 
@@ -1618,7 +1670,7 @@ def _daily_scheduler_loop() -> None:
 @app.on_event("startup")
 def start_daily_scheduler() -> None:
     global _DAILY_SCHEDULER_STARTED
-    enabled = get_project_env("ENABLE_DAILY_AUTOMATION", "false").strip().lower() == "true"
+    enabled = _scheduler_enabled()
     if not enabled or _DAILY_SCHEDULER_STARTED:
         return
     _DAILY_SCHEDULER_STARTED = True

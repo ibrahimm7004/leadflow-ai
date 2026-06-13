@@ -16,24 +16,23 @@ Add these to `.env`:
 ```env
 SUPABASE_URL=https://your-project-ref.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
-ENABLE_DAILY_AUTOMATION=true
+APP_ENV=development
+RUN_IN_PROCESS_SCHEDULER=true
+ALLOWED_ORIGINS=http://127.0.0.1:5173,http://localhost:5173
 ```
 
 Keep the service role key server-side only. Do not put it in frontend env vars.
 
 ## 3. Email notifications
 
-Daily notification emails use SMTP. Add:
+Production notifications use Resend. Add:
 
 ```env
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=your-smtp-login
-SMTP_PASSWORD=your-smtp-app-password
-SMTP_FROM=your-sender-email
-SMTP_USE_TLS=true
+RESEND_API_KEY=your-resend-api-key
+RESEND_FROM_EMAIL=your-verified-resend-sender
 ```
 
+Optional local fallback: SMTP is still supported if you explicitly set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, and `SMTP_FROM`.
 The recipient defaults to `ibrahim.m7004@gmail.com` and can be changed from the app Settings page.
 
 ## 4. Run locally
@@ -58,10 +57,16 @@ http://127.0.0.1:5173
 
 ## 5. Daily run behavior
 
-When `ENABLE_DAILY_AUTOMATION=true`, the backend starts a background scheduler that runs every day at 5:00 AM America/New_York.
+For local development, `RUN_IN_PROCESS_SCHEDULER=true` starts a background scheduler that runs every day at 5:00 AM America/New_York.
 
-The backend process must be running at that time. For production, deploy the backend on an always-on host or use an external cron service to call:
+For production, use a dedicated cron job instead of relying on the web process. This repo includes a cron-safe entrypoint:
 
 ```text
-POST /api/app/run-daily
+python -m leadgen.run_daily_job
 ```
+
+Recommended deployment:
+
+- Vercel for the frontend
+- Render web service for FastAPI
+- Render cron job for `python -m leadgen.run_daily_job`
