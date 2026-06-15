@@ -582,16 +582,25 @@ def app_bootstrap() -> Dict[str, Any]:
     settings = dict(hosted_store.DEFAULT_SETTINGS)
     schedule = hosted_store.DEFAULT_SCHEDULE
     latest_run: Dict[str, Any] = {}
+    effective_search = {
+        "today": hosted_store.effective_search_preview_for_date(_today_est()),
+        "tomorrow": hosted_store.effective_search_preview_for_date(_today_est() + timedelta(days=1)),
+    } if db_status["configured"] else {}
     if db_status["configured"]:
         try:
             settings = hosted_store.get_settings()
             schedule = hosted_store.get_schedule()
             latest_run = hosted_store.search_run_summary(hosted_store.latest_search_run(run_date=_today_est().isoformat()))
+            effective_search = {
+                "today": hosted_store.effective_search_preview_for_date(_today_est()),
+                "tomorrow": hosted_store.effective_search_preview_for_date(_today_est() + timedelta(days=1)),
+            }
         except HostedStoreError as exc:
             return {
                 "hostedDb": db_status,
                 "settings": settings,
                 "schedule": schedule,
+                "effectiveSearch": effective_search,
                 "setupError": str(exc),
             }
     return {
@@ -600,6 +609,7 @@ def app_bootstrap() -> Dict[str, Any]:
         "schedule": schedule,
         "today": _today_est().isoformat(),
         "latestRun": latest_run,
+        "effectiveSearch": effective_search,
     }
 
 
@@ -662,7 +672,26 @@ def app_get_settings() -> Dict[str, Any]:
 @app.put("/api/app/settings")
 def app_update_settings(payload: SettingsRequest) -> Dict[str, Any]:
     try:
-        return {"settings": hosted_store.update_settings(payload.settings)}
+        settings = hosted_store.update_settings(payload.settings)
+        today = _today_est()
+        return {
+            "settings": settings,
+            "effectiveSearch": {
+                "today": hosted_store.effective_search_preview_for_date(today),
+                "tomorrow": hosted_store.effective_search_preview_for_date(today + timedelta(days=1)),
+            },
+        }
+    except HostedStoreError as exc:
+        raise _hosted_error(exc) from exc
+
+
+@app.get("/api/app/effective-search")
+def app_effective_search(runDate: str = "") -> Dict[str, Any]:
+    try:
+        target_date = date.fromisoformat(runDate) if runDate else _today_est()
+        return hosted_store.effective_search_preview_for_date(target_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid runDate. Expected YYYY-MM-DD.") from exc
     except HostedStoreError as exc:
         raise _hosted_error(exc) from exc
 

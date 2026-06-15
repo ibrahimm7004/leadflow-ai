@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { AnimatePresence, motion } from "framer-motion";
 import {
@@ -68,10 +68,30 @@ const DEFAULT_SEARCH = {
   enabled: true,
 };
 
+const INITIAL_SETTINGS = {
+  visibleColumns: DEFAULT_COLUMNS,
+  notificationEmail: "ibrahim.m7004@gmail.com",
+  emailNotificationsEnabled: true,
+  dailyAutomationEnabled: true,
+  weekendsOff: false,
+  defaultSearch: DEFAULT_SEARCH,
+  calendarOverrides: {},
+};
+
 function normalizeSearchConfig(value = {}, fallback = DEFAULT_SEARCH) {
   return {
     ...fallback,
     ...Object.fromEntries(Object.entries(value || {}).filter(([, item]) => item !== undefined && item !== null)),
+  };
+}
+
+function normalizeAppSettings(value = {}) {
+  return {
+    ...INITIAL_SETTINGS,
+    ...value,
+    visibleColumns: value?.visibleColumns?.length ? value.visibleColumns : DEFAULT_COLUMNS,
+    defaultSearch: normalizeSearchConfig(value?.defaultSearch || DEFAULT_SEARCH),
+    calendarOverrides: value?.calendarOverrides || {},
   };
 }
 
@@ -103,18 +123,51 @@ function calendarCells(monthDate) {
   });
 }
 
-function api(path, options = {}) {
-  return fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers || {}),
-    },
-  }).then(async (response) => {
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.detail || "Request failed.");
-    return data;
-  });
+function wait(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function stableValue(value) {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableValue(value[key])]));
+  }
+  return value;
+}
+
+function serializeSettings(value) {
+  return JSON.stringify(stableValue(value || {}));
+}
+
+async function api(path, options = {}, retryOptions = {}) {
+  const { attempts = 1, delayMs = 0, retryStatuses = [502, 503, 504], onRetry } = retryOptions;
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await fetch(`${API_BASE}${path}`, {
+        ...options,
+        headers: {
+          "Content-Type": "application/json",
+          ...(options.headers || {}),
+        },
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const error = new Error(data.detail || `Request failed (${response.status}).`);
+        error.status = response.status;
+        throw error;
+      }
+      return data;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error("Request failed.");
+      const retryableNetwork = lastError.message === "Failed to fetch";
+      const retryableStatus = retryStatuses.includes(lastError.status);
+      if (attempt >= attempts || (!retryableNetwork && !retryableStatus)) break;
+      if (onRetry) onRetry({ attempt, error: lastError });
+      if (delayMs) await wait(delayMs);
+    }
+  }
+  throw lastError || new Error("Request failed.");
 }
 
 function cls(...values) {
@@ -238,6 +291,7 @@ function Metric({ label, value, tone = "" }) {
 }
 
 function SetupNotice({ bootstrap }) {
+  if (!bootstrap) return null;
   if (bootstrap?.hostedDb?.configured && !bootstrap?.setupError) return null;
   return (
     <section className="setup-strip">
@@ -253,6 +307,43 @@ function SetupNotice({ bootstrap }) {
       </div>
     </section>
   );
+}
+
+function BackendWakeNotice({ backendState, onRetry }) {
+  if (backendState.status === "ready") return null;
+  const waking = backendState.status === "waking";
+  return (
+    <section className={cls("setup-strip", "wake-strip", waking && "is-waking", backendState.status === "error" && "is-error")}>
+      {waking ? <Loader2 className="spin" size={20} /> : <Clock3 size={20} />}
+      <div>
+        <strong>{waking ? "Waking backend" : "Backend unavailable"}</strong>
+        <p>
+          {waking
+            ? "Render is waking up. The app will load live settings and leads as soon as the backend responds."
+            : "The backend did not respond yet. Retry to wake it again and keep the tab open for a minute."}
+        </p>
+        {backendState.message && <small>{backendState.message}</small>}
+      </div>
+      {!waking && (
+        <button onClick={onRetry}>
+          <RefreshCw size={16} />
+          Retry
+        </button>
+      )}
+    </section>
+  );
+}
+
+function SyncBadge({ syncState }) {
+  const labelByStatus = {
+    synced: "Synced",
+    saving: "Saving",
+    dirty: "Pending save",
+    waking: "Retrying backend",
+    error: "Save failed",
+  };
+  if (!syncState?.status) return null;
+  return <span className={cls("sync-badge", `is-${syncState.status}`)}>{labelByStatus[syncState.status] || syncState.status}</span>;
 }
 
 function LeadRow({ row, visibleColumns, onTick, onDebug }) {
@@ -528,7 +619,7 @@ function DefaultSearchEditor({ config, weekendsOff, onChange, onKeepWeekendsOff,
   );
 }
 
-function TodayPage({ bootstrap, settings, setSettings }) {
+function TodayPage({ bootstrap, settings, setSettings, backendState, onWakeBackend }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -543,9 +634,14 @@ function TodayPage({ bootstrap, settings, setSettings }) {
     setLoading(true);
     setError("");
     try {
-      const data = await api("/api/app/leads/today");
+      const data = await api("/api/app/leads/today", {}, {
+        attempts: 3,
+        delayMs: 2500,
+        onRetry: () => setError("Waking backend and retrying today's leads..."),
+      });
       setRows(data.rows || []);
       setRunSummary(data.runSummary || {});
+      setError("");
     } catch (err) {
       setError(err.message);
     } finally {
@@ -554,9 +650,13 @@ function TodayPage({ bootstrap, settings, setSettings }) {
   };
 
   useEffect(() => {
+    if (backendState.status !== "ready") {
+      setLoading(false);
+      return;
+    }
     if (bootstrap?.hostedDb?.configured) loadToday();
     else setLoading(false);
-  }, [bootstrap?.hostedDb?.configured]);
+  }, [backendState.status, bootstrap?.hostedDb?.configured]);
 
   useEffect(() => {
     if (bootstrap?.latestRun) {
@@ -594,7 +694,11 @@ function TodayPage({ bootstrap, settings, setSettings }) {
     setLoading(true);
     setError("");
     try {
-      const data = await api("/api/app/run-daily", { method: "POST", body: JSON.stringify({ notify: false }) });
+      const data = await api("/api/app/run-daily", { method: "POST", body: JSON.stringify({ notify: false }) }, {
+        attempts: 3,
+        delayMs: 2500,
+        onRetry: () => setError("Waking backend and retrying the daily run..."),
+      });
       setRunSummary(data.runSummary || {});
       await loadToday();
     } catch (err) {
@@ -638,6 +742,7 @@ function TodayPage({ bootstrap, settings, setSettings }) {
 
   return (
     <motion.main className="page" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -12 }}>
+      <BackendWakeNotice backendState={backendState} onRetry={onWakeBackend} />
       <SetupNotice bootstrap={bootstrap} />
       <section className="hero-workspace">
         <div>
@@ -716,7 +821,7 @@ function TodayPage({ bootstrap, settings, setSettings }) {
             <LeadRow key={row.id} row={row} visibleColumns={visibleColumns} onTick={tickLead} onDebug={setDebugRow} />
           ))}
         </AnimatePresence>
-        {!loading && !sortedRows.length && (
+        {!loading && backendState.status === "ready" && !sortedRows.length && (
           <div className="empty-state">
             <Clock3 size={28} />
             <strong>No leads for today yet</strong>
@@ -731,7 +836,7 @@ function TodayPage({ bootstrap, settings, setSettings }) {
   );
 }
 
-function AllLeadsPage({ settings }) {
+function AllLeadsPage({ settings, backendState, onWakeBackend }) {
   const [rows, setRows] = useState([]);
   const [filters, setFilters] = useState({ q: "", dateFrom: "", dateTo: "", ticked: "", hasEmail: "", minRating: "", maxReviews: "" });
   const [loading, setLoading] = useState(false);
@@ -748,8 +853,13 @@ function AllLeadsPage({ settings }) {
     setError("");
     try {
       const params = new URLSearchParams(Object.entries(filters).filter(([, value]) => value));
-      const data = await api(`/api/app/leads?${params.toString()}`);
+      const data = await api(`/api/app/leads?${params.toString()}`, {}, {
+        attempts: 3,
+        delayMs: 2500,
+        onRetry: () => setError("Waking backend and retrying the archive..."),
+      });
       setRows(data.rows || []);
+      setError("");
     } catch (err) {
       setError(err.message);
     } finally {
@@ -758,8 +868,8 @@ function AllLeadsPage({ settings }) {
   };
 
   useEffect(() => {
-    load();
-  }, []);
+    if (backendState.status === "ready") load();
+  }, [backendState.status]);
 
   const set = (key, value) => setFilters((current) => ({ ...current, [key]: value }));
 
@@ -786,6 +896,7 @@ function AllLeadsPage({ settings }) {
 
   return (
     <motion.main className="page" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -12 }}>
+      <BackendWakeNotice backendState={backendState} onRetry={onWakeBackend} />
       <section className="archive-hero">
         <div>
           <p className="eyebrow">All Leads</p>
@@ -886,32 +997,15 @@ function AllLeadsPage({ settings }) {
   );
 }
 
-function SettingsPage({ settings, setSettings }) {
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState("");
+function SettingsPage({ settings, setSettings, backendState, onWakeBackend, syncState, onFlushSettings, effectiveSearch, bootstrap }) {
   const [calendarMonth, setCalendarMonth] = useState(new Date());
   const [selectedDate, setSelectedDate] = useState("");
   const [calendarOpen, setCalendarOpen] = useState(false);
   const [defaultEditorOpen, setDefaultEditorOpen] = useState(false);
   const defaultSearch = normalizeSearchConfig(settings.defaultSearch || DEFAULT_SEARCH);
   const overrides = settings.calendarOverrides && typeof settings.calendarOverrides === "object" ? settings.calendarOverrides : {};
-
-  const saveAll = async () => {
-    setSaving(true);
-    setMessage("");
-    try {
-      const settingsResponse = await api("/api/app/settings", {
-        method: "PUT",
-        body: JSON.stringify({ settings }),
-      });
-      setSettings(settingsResponse.settings);
-      setMessage("Saved.");
-    } catch (err) {
-      setMessage(err.message);
-    } finally {
-      setSaving(false);
-    }
-  };
+  const tomorrowPreview = effectiveSearch?.tomorrow || null;
+  const editable = backendState.status === "ready" && bootstrap?.hostedDb?.configured !== false && !bootstrap?.setupError;
 
   const toggleColumn = (column) => {
     const current = settings.visibleColumns || DEFAULT_COLUMNS;
@@ -958,112 +1052,61 @@ function SettingsPage({ settings, setSettings }) {
 
   return (
     <motion.main className="page" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -12 }}>
+      <BackendWakeNotice backendState={backendState} onRetry={onWakeBackend} />
       <section className="page-heading">
         <div>
           <p className="eyebrow">Settings</p>
           <h1>Search settings.</h1>
         </div>
-        <button className="dark" onClick={saveAll} disabled={saving}>
-          {saving ? <Loader2 className="spin" size={18} /> : <Check size={18} />}
-          Save
-        </button>
+        <div className="settings-heading-actions">
+          <SyncBadge syncState={syncState} />
+          <button className="dark" onClick={onFlushSettings} disabled={!editable || syncState.status === "saving"}>
+            {syncState.status === "saving" ? <Loader2 className="spin" size={18} /> : <Check size={18} />}
+            Sync now
+          </button>
+        </div>
       </section>
-      {message && <p className="notice-line">{message}</p>}
 
-      <section className="settings-section">
-        <div className="section-title">
-          <CalendarDays size={20} />
-          <div>
-            <strong>Search calendar</strong>
-            <span>Compact previews stay visible here. Open either surface when you need the full editor.</span>
+      <section className="settings-status-strip">
+        <div>
+          <strong>Tomorrow 5:00 AM run</strong>
+          <p>
+            {tomorrowPreview
+              ? tomorrowPreview.enabled
+                ? `${tomorrowPreview.query} • ${tomorrowPreview.config.numLeads} leads • ${tomorrowPreview.config.minRating}+ stars • ${tomorrowPreview.config.maxUserReviews} max reviews`
+                : `${tomorrowPreview.query} • disabled`
+              : "Waiting for backend schedule confirmation."}
+          </p>
+        </div>
+        <div className="settings-status-meta">
+          <span>{tomorrowPreview?.source === "override" ? "Date override" : "Default search"}</span>
+          <span>{syncState.message || "Changes auto-save after a short pause."}</span>
+        </div>
+      </section>
+
+      <fieldset className="settings-fieldset" disabled={!editable}>
+        <section className="settings-section">
+          <div className="section-title">
+            <CalendarDays size={20} />
+            <div>
+              <strong>Search calendar</strong>
+              <span>Compact previews stay visible here. Open either surface when you need the full editor.</span>
+            </div>
           </div>
-        </div>
-        <div className="settings-feature-grid">
-          <article className="settings-preview-card calendar-preview-card">
-            <div className="settings-preview-head">
-              <div>
-                <span>Calendar</span>
-                <strong>{monthLabel(calendarMonth)}</strong>
-              </div>
-              <button onClick={() => setCalendarOpen(true)}>Open</button>
-            </div>
-            <div className="calendar-mini-weekdays">
-              {DAY_NAMES.map((day) => <span key={day}>{day.slice(0, 1)}</span>)}
-            </div>
-            <div className="calendar-mini-grid">
-              {previewCells.map((date) => {
-                const key = localDateKey(date);
-                const isCurrentMonth = date.getMonth() === calendarMonth.getMonth();
-                const hasOverride = Boolean(overrides[key]);
-                const config = configForDate(key);
-                return (
-                  <button
-                    key={key}
-                    className={cls("calendar-mini-day", !isCurrentMonth && "is-muted", key === todayKey && "is-today", hasOverride && "has-override", !config.enabled && "is-off")}
-                    onClick={() => {
-                      setCalendarOpen(true);
-                      setSelectedDate(key);
-                    }}
-                  >
-                    {date.getDate()}
-                  </button>
-                );
-              })}
-            </div>
-            <div className="settings-preview-meta">
-              <span>{Object.keys(overrides).length} overrides</span>
-              <span>{settings.weekendsOff ? "Weekends off" : "Weekends live"}</span>
-              <span>{nextActiveDay ? `Next live day ${nextActiveDay.getDate()}` : "No active days"}</span>
-            </div>
-          </article>
-
-          <article className="settings-preview-card default-search-preview">
-            <div className="settings-preview-head">
-              <div>
-                <span>Default search</span>
-                <strong>{defaultSearch.businessType} in {defaultSearch.location}</strong>
-              </div>
-              <button onClick={() => setDefaultEditorOpen(true)}>Open</button>
-            </div>
-            <div className="default-stats">
-              <span>{defaultSearch.numLeads} leads</span>
-              <span>{defaultSearch.minRating}+ stars</span>
-              <span>{defaultSearch.maxUserReviews} max reviews</span>
-            </div>
-            <div className="settings-preview-body">
-              <p>{defaultSearch.searchMode === "qualified_no_website" ? "Only businesses without owned websites" : "All businesses in the selected market"}</p>
-              <div className="settings-preview-chips">
-                <strong className={defaultSearch.enabled ? "ready" : ""}>{defaultSearch.enabled ? "Search on" : "Search off"}</strong>
-                <strong>{settings.weekendsOff ? "Weekends off" : "Weekends on"}</strong>
-              </div>
-            </div>
-          </article>
-        </div>
-      </section>
-
-      <AnimatePresence>
-        {calendarOpen && (
-          <motion.div className="calendar-popover-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-            <motion.aside className="calendar-popover calendar-browser-popover" initial={{ opacity: 0, y: 18, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 18, scale: 0.98 }}>
-              <header>
+          <div className="settings-feature-grid">
+            <article className="settings-preview-card calendar-preview-card">
+              <div className="settings-preview-head">
                 <div>
-                  <span>Search calendar</span>
-                  <h2>{monthLabel(calendarMonth)}</h2>
+                  <span>Calendar</span>
+                  <strong>{monthLabel(calendarMonth)}</strong>
                 </div>
-                <button onClick={() => setCalendarOpen(false)} aria-label="Close calendar browser">
-                  <X size={20} />
-                </button>
-              </header>
-              <div className="calendar-browser-toolbar">
-                <button onClick={() => setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() - 1, 1))}>Prev</button>
-                <button onClick={() => setCalendarMonth(new Date())}>Today</button>
-                <button onClick={() => setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 1))}>Next</button>
+                <button onClick={() => setCalendarOpen(true)} disabled={!editable}>Open</button>
               </div>
-              <div className="calendar-weekdays">
-                {DAY_NAMES.map((day) => <span key={day}>{day}</span>)}
+              <div className="calendar-mini-weekdays">
+                {DAY_NAMES.map((day) => <span key={day}>{day.slice(0, 1)}</span>)}
               </div>
-              <div className="calendar-grid">
-                {cells.map((date) => {
+              <div className="calendar-mini-grid">
+                {previewCells.map((date) => {
                   const key = localDateKey(date);
                   const isCurrentMonth = date.getMonth() === calendarMonth.getMonth();
                   const hasOverride = Boolean(overrides[key]);
@@ -1071,116 +1114,256 @@ function SettingsPage({ settings, setSettings }) {
                   return (
                     <button
                       key={key}
-                      className={cls("calendar-day", !isCurrentMonth && "is-muted", key === todayKey && "is-today", hasOverride && "has-override", !config.enabled && "is-off")}
-                      onClick={() => setSelectedDate(key)}
+                      className={cls("calendar-mini-day", !isCurrentMonth && "is-muted", key === todayKey && "is-today", hasOverride && "has-override", !config.enabled && "is-off")}
+                      onClick={() => {
+                        setCalendarOpen(true);
+                        setSelectedDate(key);
+                      }}
+                      disabled={!editable}
                     >
-                      <strong>{date.getDate()}</strong>
-                      <span>{config.enabled ? `${config.businessType} ? ${config.numLeads}` : "Off"}</span>
+                      {date.getDate()}
                     </button>
                   );
                 })}
               </div>
-            </motion.aside>
-          </motion.div>
-        )}
-      </AnimatePresence>
+              <div className="settings-preview-meta">
+                <span>{Object.keys(overrides).length} overrides</span>
+                <span>{settings.weekendsOff ? "Weekends off" : "Weekends live"}</span>
+                <span>{nextActiveDay ? `Next live day ${nextActiveDay.getDate()}` : "No active days"}</span>
+              </div>
+            </article>
 
-      <AnimatePresence>
-        {defaultEditorOpen && (
-          <DefaultSearchEditor
-            config={defaultSearch}
-            weekendsOff={settings.weekendsOff}
-            onChange={setDefaultSearch}
-            onKeepWeekendsOff={keepWeekendsOff}
-            onAllowWeekends={allowWeekends}
-            onClose={() => setDefaultEditorOpen(false)}
-          />
-        )}
-      </AnimatePresence>
-
-      <AnimatePresence>
-        {selectedDate && (
-          <SelectedDayEditor
-            dateKey={selectedDate}
-            config={configForDate(selectedDate)}
-            inherited={!overrides[selectedDate]}
-            onChange={(config) => setDateOverride(selectedDate, config)}
-            onClear={() => clearDateOverride(selectedDate)}
-            onClose={() => setSelectedDate("")}
-          />
-        )}
-      </AnimatePresence>
-
-      <section className="settings-section">
-        <div className="section-title">
-          <Bell size={20} />
-          <div>
-            <strong>Email notification</strong>
-            <span>Sent after the 5 AM run if SMTP credentials are configured.</span>
+            <article className="settings-preview-card default-search-preview">
+              <div className="settings-preview-head">
+                <div>
+                  <span>Default search</span>
+                  <strong>{defaultSearch.businessType} in {defaultSearch.location}</strong>
+                </div>
+                <button onClick={() => setDefaultEditorOpen(true)} disabled={!editable}>Open</button>
+              </div>
+              <div className="default-stats">
+                <span>{defaultSearch.numLeads} leads</span>
+                <span>{defaultSearch.minRating}+ stars</span>
+                <span>{defaultSearch.maxUserReviews} max reviews</span>
+              </div>
+              <div className="settings-preview-body">
+                <p>{defaultSearch.searchMode === "qualified_no_website" ? "Only businesses without owned websites" : "All businesses in the selected market"}</p>
+                <div className="settings-preview-chips">
+                  <strong className={defaultSearch.enabled ? "ready" : ""}>{defaultSearch.enabled ? "Search on" : "Search off"}</strong>
+                  <strong>{settings.weekendsOff ? "Weekends off" : "Weekends on"}</strong>
+                </div>
+              </div>
+            </article>
           </div>
-        </div>
-        <div className="settings-grid">
-          <label>
-            <span>Recipient</span>
-            <input value={settings.notificationEmail || ""} onChange={(event) => setSettings({ ...settings, notificationEmail: event.target.value })} />
-          </label>
-          <button className={settings.emailNotificationsEnabled ? "toggle is-on" : "toggle"} onClick={() => setSettings({ ...settings, emailNotificationsEnabled: !settings.emailNotificationsEnabled })}>
-            {settings.emailNotificationsEnabled ? "Notifications on" : "Notifications off"}
-          </button>
-          <button className={settings.dailyAutomationEnabled ? "toggle is-on" : "toggle"} onClick={() => setSettings({ ...settings, dailyAutomationEnabled: !settings.dailyAutomationEnabled })}>
-            {settings.dailyAutomationEnabled ? "Daily automation on" : "Daily automation off"}
-          </button>
-        </div>
-      </section>
+        </section>
 
-      <section className="settings-section">
-        <div className="section-title">
-          <Eye size={20} />
-          <div>
-            <strong>Lead display columns</strong>
-            <span>Choose what appears on Today and All Leads rows.</span>
+        <AnimatePresence>
+          {calendarOpen && (
+            <motion.div className="calendar-popover-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+              <motion.aside className="calendar-popover calendar-browser-popover" initial={{ opacity: 0, y: 18, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 18, scale: 0.98 }}>
+                <header>
+                  <div>
+                    <span>Search calendar</span>
+                    <h2>{monthLabel(calendarMonth)}</h2>
+                  </div>
+                  <button onClick={() => setCalendarOpen(false)} aria-label="Close calendar browser">
+                    <X size={20} />
+                  </button>
+                </header>
+                <div className="calendar-browser-toolbar">
+                  <button onClick={() => setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() - 1, 1))}>Prev</button>
+                  <button onClick={() => setCalendarMonth(new Date())}>Today</button>
+                  <button onClick={() => setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 1))}>Next</button>
+                </div>
+                <div className="calendar-weekdays">
+                  {DAY_NAMES.map((day) => <span key={day}>{day}</span>)}
+                </div>
+                <div className="calendar-grid">
+                  {cells.map((date) => {
+                    const key = localDateKey(date);
+                    const isCurrentMonth = date.getMonth() === calendarMonth.getMonth();
+                    const hasOverride = Boolean(overrides[key]);
+                    const config = configForDate(key);
+                    return (
+                      <button
+                        key={key}
+                        className={cls("calendar-day", !isCurrentMonth && "is-muted", key === todayKey && "is-today", hasOverride && "has-override", !config.enabled && "is-off")}
+                        onClick={() => setSelectedDate(key)}
+                      >
+                        <strong>{date.getDate()}</strong>
+                        <span>{config.enabled ? `${config.businessType} • ${config.numLeads}` : "Off"}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </motion.aside>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {defaultEditorOpen && (
+            <DefaultSearchEditor
+              config={defaultSearch}
+              weekendsOff={settings.weekendsOff}
+              onChange={setDefaultSearch}
+              onKeepWeekendsOff={keepWeekendsOff}
+              onAllowWeekends={allowWeekends}
+              onClose={() => setDefaultEditorOpen(false)}
+            />
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {selectedDate && (
+            <SelectedDayEditor
+              dateKey={selectedDate}
+              config={configForDate(selectedDate)}
+              inherited={!overrides[selectedDate]}
+              onChange={(config) => setDateOverride(selectedDate, config)}
+              onClear={() => clearDateOverride(selectedDate)}
+              onClose={() => setSelectedDate("")}
+            />
+          )}
+        </AnimatePresence>
+
+        <section className="settings-section">
+          <div className="section-title">
+            <Bell size={20} />
+            <div>
+              <strong>Email notification</strong>
+              <span>Sent after the 5 AM run if SMTP credentials are configured.</span>
+            </div>
           </div>
-        </div>
-        <div className="column-picker">
-          {COLUMN_OPTIONS.map(([key, label]) => (
-            <button key={key} className={(settings.visibleColumns || DEFAULT_COLUMNS).includes(key) ? "is-selected" : ""} onClick={() => toggleColumn(key)}>
-              {label}
+          <div className="settings-grid">
+            <label>
+              <span>Recipient</span>
+              <input value={settings.notificationEmail || ""} onChange={(event) => setSettings({ ...settings, notificationEmail: event.target.value })} />
+            </label>
+            <button className={settings.emailNotificationsEnabled ? "toggle is-on" : "toggle"} onClick={() => setSettings({ ...settings, emailNotificationsEnabled: !settings.emailNotificationsEnabled })}>
+              {settings.emailNotificationsEnabled ? "Notifications on" : "Notifications off"}
             </button>
-          ))}
-        </div>
-      </section>
+            <button className={settings.dailyAutomationEnabled ? "toggle is-on" : "toggle"} onClick={() => setSettings({ ...settings, dailyAutomationEnabled: !settings.dailyAutomationEnabled })}>
+              {settings.dailyAutomationEnabled ? "Daily automation on" : "Daily automation off"}
+            </button>
+          </div>
+        </section>
+
+        <section className="settings-section">
+          <div className="section-title">
+            <Eye size={20} />
+            <div>
+              <strong>Lead display columns</strong>
+              <span>Choose what appears on Today and All Leads rows.</span>
+            </div>
+          </div>
+          <div className="column-picker">
+            {COLUMN_OPTIONS.map(([key, label]) => (
+              <button key={key} className={(settings.visibleColumns || DEFAULT_COLUMNS).includes(key) ? "is-selected" : ""} onClick={() => toggleColumn(key)}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </section>
+      </fieldset>
     </motion.main>
   );
 }
 function App() {
   const [page, setPage] = useState("today");
   const [bootstrap, setBootstrap] = useState(null);
-  const [settings, setSettings] = useState({ visibleColumns: DEFAULT_COLUMNS });
+  const [settings, setSettingsState] = useState(INITIAL_SETTINGS);
+  const [effectiveSearch, setEffectiveSearch] = useState({});
+  const [backendState, setBackendState] = useState({ status: "waking", message: "Connecting to backend..." });
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [syncState, setSyncState] = useState({ status: "", message: "" });
+  const lastSavedSettingsRef = useRef(serializeSettings(INITIAL_SETTINGS));
+  const saveTimerRef = useRef(null);
+
+  const setSettings = useCallback((nextOrUpdater) => {
+    setSettingsState((current) => normalizeAppSettings(typeof nextOrUpdater === "function" ? nextOrUpdater(current) : nextOrUpdater));
+  }, []);
+
+  const loadBootstrap = useCallback(async () => {
+    setBackendState({ status: "waking", message: "Waking Render backend..." });
+    try {
+      const data = await api("/api/app/bootstrap", {}, {
+        attempts: 20,
+        delayMs: 3000,
+        onRetry: ({ attempt }) => {
+          setBackendState({ status: "waking", message: `Waking backend... attempt ${attempt + 1} of 20.` });
+        },
+      });
+      const normalizedSettings = normalizeAppSettings(data.settings || {});
+      setBootstrap(data);
+      setEffectiveSearch(data.effectiveSearch || {});
+      setSettingsState(normalizedSettings);
+      setSettingsLoaded(true);
+      lastSavedSettingsRef.current = serializeSettings(normalizedSettings);
+      setBackendState({ status: "ready", message: "" });
+      setSyncState({ status: "synced", message: "Backend connected. Settings are live." });
+    } catch (error) {
+      setBackendState({ status: "error", message: error.message });
+      setSyncState((current) => (current.status === "saving" ? { status: "error", message: error.message } : current));
+    }
+  }, []);
+
+  const flushSettings = useCallback(async (snapshot) => {
+    if (!settingsLoaded || backendState.status !== "ready") return false;
+    const payloadSettings = normalizeAppSettings(snapshot);
+    const snapshotSerialized = serializeSettings(payloadSettings);
+    setSyncState({ status: "saving", message: "Saving changes to backend..." });
+    try {
+      const response = await api("/api/app/settings", {
+        method: "PUT",
+        body: JSON.stringify({ settings: payloadSettings }),
+      }, {
+        attempts: 3,
+        delayMs: 2500,
+        onRetry: () => setSyncState({ status: "waking", message: "Waking backend and retrying settings save..." }),
+      });
+      const confirmedSettings = normalizeAppSettings(response.settings || payloadSettings);
+      const confirmedSerialized = serializeSettings(confirmedSettings);
+      lastSavedSettingsRef.current = confirmedSerialized;
+      if (response.effectiveSearch) setEffectiveSearch(response.effectiveSearch);
+      setBootstrap((current) => (current ? { ...current, settings: confirmedSettings, effectiveSearch: response.effectiveSearch || current.effectiveSearch } : current));
+      setSettingsState((current) => (serializeSettings(current) === snapshotSerialized ? confirmedSettings : current));
+      setSyncState({ status: "synced", message: "All changes saved." });
+      return true;
+    } catch (error) {
+      setSyncState({ status: "error", message: error.message });
+      return false;
+    }
+  }, [backendState.status, settingsLoaded]);
+
+  const flushCurrentSettings = useCallback(async () => {
+    if (saveTimerRef.current) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    await flushSettings(settings);
+  }, [flushSettings, settings]);
 
   useEffect(() => {
-    api("/api/app/bootstrap")
-      .then((data) => {
-        setBootstrap(data);
-        setSettings({
-          ...data.settings,
-          visibleColumns: data.settings?.visibleColumns || DEFAULT_COLUMNS,
-          defaultSearch: normalizeSearchConfig(data.settings?.defaultSearch || DEFAULT_SEARCH),
-          calendarOverrides: data.settings?.calendarOverrides || {},
-        });
-      })
-      .catch((error) => {
-        setBootstrap({ hostedDb: { configured: false }, setupError: error.message, today: new Date().toISOString().slice(0, 10) });
-        setSettings({
-          visibleColumns: DEFAULT_COLUMNS,
-          notificationEmail: "ibrahim.m7004@gmail.com",
-          emailNotificationsEnabled: true,
-          dailyAutomationEnabled: true,
-          weekendsOff: false,
-          defaultSearch: DEFAULT_SEARCH,
-          calendarOverrides: {},
-        });
-      });
-  }, []);
+    loadBootstrap();
+  }, [loadBootstrap]);
+
+  useEffect(() => {
+    if (!settingsLoaded || backendState.status !== "ready") return undefined;
+    const serialized = serializeSettings(settings);
+    if (serialized === lastSavedSettingsRef.current) return undefined;
+    setSyncState((current) => (current.status === "saving" ? current : { status: "dirty", message: "Unsaved changes pending." }));
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = window.setTimeout(() => {
+      flushSettings(settings);
+    }, 900);
+    return () => {
+      if (saveTimerRef.current) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+    };
+  }, [settings, settingsLoaded, backendState.status, flushSettings]);
 
   return (
     <div className="app">
@@ -1197,9 +1380,9 @@ function App() {
       </header>
 
       <AnimatePresence mode="wait">
-        {page === "today" && <TodayPage key="today" bootstrap={bootstrap} settings={settings} setSettings={setSettings} />}
-        {page === "all" && <AllLeadsPage key="all" settings={settings} />}
-        {page === "settings" && <SettingsPage key="settings" settings={settings} setSettings={setSettings} />}
+        {page === "today" && <TodayPage key="today" bootstrap={bootstrap} settings={settings} setSettings={setSettings} backendState={backendState} onWakeBackend={loadBootstrap} />}
+        {page === "all" && <AllLeadsPage key="all" settings={settings} backendState={backendState} onWakeBackend={loadBootstrap} />}
+        {page === "settings" && <SettingsPage key="settings" settings={settings} setSettings={setSettings} backendState={backendState} onWakeBackend={loadBootstrap} syncState={syncState} onFlushSettings={flushCurrentSettings} effectiveSearch={effectiveSearch} bootstrap={bootstrap} />}
       </AnimatePresence>
 
       <nav className="mobile-nav">

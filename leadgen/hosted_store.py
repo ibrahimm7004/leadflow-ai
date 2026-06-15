@@ -554,3 +554,25 @@ def search_config_for_date(run_date: date) -> Dict[str, Any]:
     if settings.get("weekendsOff") and run_date.weekday() >= 5 and not has_override:
         config["enabled"] = False
     return config
+
+
+def effective_search_preview_for_date(run_date: date) -> Dict[str, Any]:
+    settings = get_settings()
+    default_config = normalize_search_config(settings.get("defaultSearch"))
+    overrides = settings.get("calendarOverrides") if isinstance(settings.get("calendarOverrides"), dict) else {}
+    date_key = run_date.isoformat()
+    has_override = date_key in overrides and isinstance(overrides.get(date_key), dict)
+    config = normalize_search_config(overrides.get(date_key) if has_override else {}, default_config)
+    weekends_off_applied = bool(settings.get("weekendsOff") and run_date.weekday() >= 5 and not has_override)
+    if weekends_off_applied:
+        config["enabled"] = False
+    business_type = str(config.get("businessType") or "barber")
+    location = str(config.get("location") or "Boston, MA")
+    return {
+        "date": date_key,
+        "enabled": bool(config.get("enabled", True)),
+        "query": f"{business_type} in {location}",
+        "source": "override" if has_override else "default",
+        "weekendsOffApplied": weekends_off_applied,
+        "config": config,
+    }
