@@ -279,7 +279,7 @@ def upsert_leads(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     result = _request(
         "POST",
         "leads",
-        params={"on_conflict": "lead_date,place_id"},
+        params={"on_conflict": "place_id"},
         json_body=rows,
         prefer="resolution=merge-duplicates,return=representation",
     )
