@@ -28,7 +28,10 @@ import {
 } from "lucide-react";
 import "./styles.css";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+const RAW_API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+const API_BASE = RAW_API_BASE.replace(/\/$/, "");
+const API_BASE_IS_LOCALHOST = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(API_BASE);
+const FRONTEND_IS_LOCALHOST = typeof window !== "undefined" && ["localhost", "127.0.0.1"].includes(window.location.hostname);
 
 const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -159,8 +162,15 @@ async function api(path, options = {}, retryOptions = {}) {
       }
       return data;
     } catch (error) {
-      lastError = error instanceof Error ? error : new Error("Request failed.");
-      const retryableNetwork = lastError.message === "Failed to fetch";
+      const originalError = error instanceof Error ? error : new Error("Request failed.");
+      const retryableNetwork = originalError.message === "Failed to fetch";
+      lastError = originalError;
+      if (retryableNetwork) {
+        const localHint = API_BASE_IS_LOCALHOST && !FRONTEND_IS_LOCALHOST
+          ? " The deployed frontend is trying to call localhost; set VITE_API_BASE_URL in Vercel to the Render backend URL and redeploy the frontend."
+          : " Check CORS/ALLOWED_ORIGINS on the backend and confirm the API URL is reachable from the browser.";
+        lastError = new Error(`Failed to reach backend at ${API_BASE}.${localHint}`);
+      }
       const retryableStatus = retryStatuses.includes(lastError.status);
       if (attempt >= attempts || (!retryableNetwork && !retryableStatus)) break;
       if (onRetry) onRetry({ attempt, error: lastError });
@@ -194,6 +204,37 @@ function hrefFor(row, key) {
   if (key === "bestEmail") return `mailto:${value}`;
   if (["websiteUrl", "googleMapsUri", "bestEmailSourceUrl"].includes(key)) return value;
   return "";
+}
+
+function getAudit(row) {
+  return row?.auditResult && typeof row.auditResult === "object" ? row.auditResult : {};
+}
+
+function scoreNumber(value) {
+  const parsed = Number(value || 0);
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(100, parsed)) : 0;
+}
+
+function leadQualityLabel(score) {
+  if (score >= 75) return "Good lead";
+  if (score >= 50) return "Promising lead";
+  if (score >= 30) return "Weak lead";
+  return "Bad lead";
+}
+
+function satisfactionColor(score) {
+  if (score >= 75) return "#15965f";
+  if (score >= 50) return "#d49a1f";
+  if (score >= 30) return "#e56b2f";
+  return "#c9342f";
+}
+
+function formatAction(value) {
+  return String(value || "manual_research_needed").replaceAll("_", " ");
+}
+
+function listValue(value) {
+  return Array.isArray(value) ? value : [];
 }
 
 function downloadBlob(filename, content, type) {
@@ -346,7 +387,7 @@ function SyncBadge({ syncState }) {
   return <span className={cls("sync-badge", `is-${syncState.status}`)}>{labelByStatus[syncState.status] || syncState.status}</span>;
 }
 
-function LeadRow({ row, visibleColumns, onTick, onDebug }) {
+function LeadRow({ row, visibleColumns, onTick, onDebug, onAudit, auditing }) {
   const email = row.bestEmail || "";
   const website = row.websiteUrl || "";
   const externalWebsite = row.hasExternalWebsite === "true" ? row.externalWebsiteUrl : "";
@@ -440,6 +481,7 @@ function LeadRow({ row, visibleColumns, onTick, onDebug }) {
           {row.ticked && <strong>Reached out</strong>}
           {!row.ticked && !email && <strong>Needs enrichment</strong>}
           {!row.ticked && email && <strong className="ready">Ready</strong>}
+          {row.auditStatus && <strong className="ready">Audited</strong>}
         </div>
         <div className="lead-actions">
           {row.googleMapsUri && (
@@ -447,6 +489,12 @@ function LeadRow({ row, visibleColumns, onTick, onDebug }) {
               <ExternalLink size={16} />
               Map
             </a>
+          )}
+          {onAudit && (
+            <button className="action-button audit-action" onClick={() => onAudit(row)} disabled={auditing}>
+              {auditing ? <Loader2 className="spin" size={16} /> : <Sparkles size={16} />}
+              {auditing ? "Auditing" : row.auditStatus ? "Re-audit" : "Audit"}
+            </button>
           )}
           <button className="debug-link" onClick={() => onDebug(row)}>
             <Eye size={16} />
@@ -461,6 +509,7 @@ function LeadRow({ row, visibleColumns, onTick, onDebug }) {
 function DebugPanel({ row, onClose }) {
   if (!row) return null;
   const debug = row.emailDebugJson || {};
+  const audit = getAudit(row);
   return (
     <motion.div className="drawer-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
       <motion.aside className="debug-drawer" initial={{ x: 420 }} animate={{ x: 0 }} exit={{ x: 420 }}>
@@ -500,6 +549,27 @@ function DebugPanel({ row, onClose }) {
             <dt>Search</dt>
             <dd>{row.searchQuery || "None"}</dd>
           </dl>
+        </section>
+        <section>
+          <h3>Website audit</h3>
+          <dl>
+            <dt>Status</dt>
+            <dd>{row.auditStatus || "Not audited"}</dd>
+            <dt>Website status</dt>
+            <dd>{row.auditWebsiteStatus || audit.website_status || "None"}</dd>
+            <dt>Lead quality</dt>
+            <dd>{row.auditLeadQualityScore || audit.lead_quality_score || 0}</dd>
+            <dt>Priority</dt>
+            <dd>{row.auditOutreachPriority || audit.outreach_priority || "None"}</dd>
+            <dt>Next action</dt>
+            <dd>{formatAction(row.auditNextBestAction || audit.next_best_action)}</dd>
+            <dt>Pitch</dt>
+            <dd>{row.auditRecommendedPitchAngle || audit.recommended_pitch_angle || "None"}</dd>
+          </dl>
+        </section>
+        <section>
+          <h3>Audit Debug</h3>
+          <pre>{JSON.stringify(audit, null, 2) || "{}"}</pre>
         </section>
         <section>
           <h3>Scrape / AI Debug</h3>
@@ -627,6 +697,7 @@ function TodayPage({ bootstrap, settings, setSettings, backendState, onWakeBacke
   const [enriching, setEnriching] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0, found: 0, ai: 0, pages: 0 });
   const [debugRow, setDebugRow] = useState(null);
+  const [auditingIds, setAuditingIds] = useState(() => new Set());
   const [runSummary, setRunSummary] = useState(bootstrap?.latestRun || {});
   const visibleColumns = settings.visibleColumns?.length ? settings.visibleColumns : DEFAULT_COLUMNS;
 
@@ -687,6 +758,26 @@ function TodayPage({ bootstrap, settings, setSettings, backendState, onWakeBacke
     } catch (err) {
       updateRow(row);
       setError(err.message);
+    }
+  };
+
+  const auditLead = async (row) => {
+    setAuditingIds((current) => new Set([...current, row.id]));
+    setError("");
+    try {
+      const data = await api(`/api/app/leads/${row.id}/audit`, {
+        method: "POST",
+        body: JSON.stringify({ enableVisualAudit: true, storeResults: true }),
+      });
+      updateRow(data.row);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setAuditingIds((current) => {
+        const next = new Set(current);
+        next.delete(row.id);
+        return next;
+      });
     }
   };
 
@@ -818,7 +909,15 @@ function TodayPage({ bootstrap, settings, setSettings, backendState, onWakeBacke
       <section className="lead-list">
         <AnimatePresence>
           {sortedRows.map((row) => (
-            <LeadRow key={row.id} row={row} visibleColumns={visibleColumns} onTick={tickLead} onDebug={setDebugRow} />
+            <LeadRow
+              key={row.id}
+              row={row}
+              visibleColumns={visibleColumns}
+              onTick={tickLead}
+              onDebug={setDebugRow}
+              onAudit={auditLead}
+              auditing={auditingIds.has(row.id)}
+            />
           ))}
         </AnimatePresence>
         {!loading && backendState.status === "ready" && !sortedRows.length && (
@@ -842,6 +941,7 @@ function AllLeadsPage({ settings, backendState, onWakeBackend }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [debugRow, setDebugRow] = useState(null);
+  const [auditingIds, setAuditingIds] = useState(() => new Set());
   const [downloadOpen, setDownloadOpen] = useState(false);
   const visibleColumns = settings.visibleColumns?.length ? settings.visibleColumns : DEFAULT_COLUMNS;
   const activeCount = rows.filter((row) => !row.ticked).length;
@@ -891,6 +991,26 @@ function AllLeadsPage({ settings, backendState, onWakeBackend }) {
     } catch (err) {
       setError(err.message);
       setRows((current) => current.map((item) => (item.id === row.id ? row : item)));
+    }
+  };
+
+  const auditLead = async (row) => {
+    setAuditingIds((current) => new Set([...current, row.id]));
+    setError("");
+    try {
+      const data = await api(`/api/app/leads/${row.id}/audit`, {
+        method: "POST",
+        body: JSON.stringify({ enableVisualAudit: true, storeResults: true }),
+      });
+      setRows((current) => current.map((item) => (item.id === row.id ? data.row : item)));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setAuditingIds((current) => {
+        const next = new Set(current);
+        next.delete(row.id);
+        return next;
+      });
     }
   };
 
@@ -987,8 +1107,197 @@ function AllLeadsPage({ settings, backendState, onWakeBackend }) {
       {error && <p className="error-line">{error}</p>}
       <section className="lead-list">
         {rows.map((row) => (
-          <LeadRow key={row.id} row={row} visibleColumns={visibleColumns} onTick={tickLead} onDebug={setDebugRow} />
+          <LeadRow
+            key={row.id}
+            row={row}
+            visibleColumns={visibleColumns}
+            onTick={tickLead}
+            onDebug={setDebugRow}
+            onAudit={auditLead}
+            auditing={auditingIds.has(row.id)}
+          />
         ))}
+      </section>
+      <AnimatePresence>
+        {debugRow && <DebugPanel row={debugRow} onClose={() => setDebugRow(null)} />}
+      </AnimatePresence>
+    </motion.main>
+  );
+}
+
+function SatisfactionBar({ score }) {
+  const safeScore = scoreNumber(score);
+  return (
+    <div className="satisfaction-wrap">
+      <div className="satisfaction-meta">
+        <strong>{leadQualityLabel(safeScore)}</strong>
+        <span>{safeScore}/100</span>
+      </div>
+      <div className="satisfaction-bar" aria-label={`Lead quality ${safeScore} out of 100`}>
+        <div style={{ width: `${safeScore}%`, background: satisfactionColor(safeScore) }} />
+      </div>
+    </div>
+  );
+}
+
+function OutreachCard({ row, onAudit, auditing, onDebug }) {
+  const audit = getAudit(row);
+  const score = scoreNumber(row.auditLeadQualityScore || audit.lead_quality_score);
+  const opportunity = scoreNumber(row.auditWebsiteOpportunityScore || audit.website_opportunity_score);
+  const impactIssues = listValue(audit.top_business_impact_issues);
+  const verifiedIssues = listValue(audit.top_verified_issues);
+  const issues = impactIssues.length ? impactIssues : verifiedIssues;
+  const channels = listValue(audit.contact_channels);
+  const pitch = row.auditRecommendedPitchAngle || audit.recommended_pitch_angle || "No pitch angle captured.";
+  const website = row.websiteUrl || row.externalWebsiteUrl || audit.final_url || "";
+
+  return (
+    <motion.article className="outreach-card" layout initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
+      <div className="outreach-identity">
+        <div className="lead-kicker">
+          <span>{row.auditOutreachPriority || audit.outreach_priority || "priority"}</span>
+          <span>{formatDate(row.auditedAt)}</span>
+        </div>
+        <h3>{row.name || audit.business_name || "Unnamed business"}</h3>
+        <p>{row.businessType || audit.business_category || row.searchQuery || "Local business"}</p>
+        <div className="outreach-links">
+          {website && <a href={website} target="_blank" rel="noreferrer">Website</a>}
+          {row.googleMapsUri && <a href={row.googleMapsUri} target="_blank" rel="noreferrer">Map</a>}
+          {row.phone && <a href={`tel:${row.phone}`}>Call</a>}
+        </div>
+      </div>
+
+      <div className="outreach-visual-column">
+        <SatisfactionBar score={score} />
+        <div className="outreach-score-grid">
+          <span>Opportunity <strong>{opportunity}</strong></span>
+          <span>Visual <strong>{audit.visual_score ?? 0}</strong></span>
+          <span>Conversion <strong>{audit.conversion_issue_score ?? 0}</strong></span>
+        </div>
+      </div>
+
+      <div className="outreach-insights">
+        <strong>{row.auditRecommendedPitchType || audit.recommended_pitch_type || "Pitch angle"}</strong>
+        <p>{pitch}</p>
+        <ul>
+          {issues.slice(0, 4).map((issue) => <li key={issue}>{issue}</li>)}
+          {!issues.length && <li>No major audit issues captured.</li>}
+        </ul>
+      </div>
+
+      <div className="outreach-next">
+        <span>Next best action</span>
+        <strong>{formatAction(row.auditNextBestAction || audit.next_best_action)}</strong>
+        <small>{channels.length ? `Channels: ${channels.join(", ")}` : row.bestEmail ? "Email available" : "No contact channel captured"}</small>
+        <button className="dark" onClick={() => onAudit(row)} disabled={auditing}>
+          {auditing ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}
+          {auditing ? "Auditing" : "Re-audit"}
+        </button>
+        <button onClick={() => onDebug(row)}>
+          <Eye size={17} />
+          Details
+        </button>
+      </div>
+    </motion.article>
+  );
+}
+
+function OutreachPage({ backendState, onWakeBackend }) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [auditingIds, setAuditingIds] = useState(() => new Set());
+  const [debugRow, setDebugRow] = useState(null);
+
+  const load = async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const data = await api("/api/app/outreach", {}, {
+        attempts: 3,
+        delayMs: 2500,
+        onRetry: () => setError("Waking backend and retrying outreach leads..."),
+      });
+      setRows(data.rows || []);
+      setError("");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (backendState.status === "ready") load();
+  }, [backendState.status]);
+
+  const auditLead = async (row) => {
+    setAuditingIds((current) => new Set([...current, row.id]));
+    setError("");
+    try {
+      const data = await api(`/api/app/leads/${row.id}/audit`, {
+        method: "POST",
+        body: JSON.stringify({ enableVisualAudit: true, storeResults: true }),
+      });
+      setRows((current) => current.map((item) => (item.id === row.id ? data.row : item)));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setAuditingIds((current) => {
+        const next = new Set(current);
+        next.delete(row.id);
+        return next;
+      });
+    }
+  };
+
+  const sortedRows = useMemo(
+    () => [...rows].sort((a, b) => scoreNumber(b.auditLeadQualityScore || getAudit(b).lead_quality_score) - scoreNumber(a.auditLeadQualityScore || getAudit(a).lead_quality_score)),
+    [rows],
+  );
+  const goodCount = rows.filter((row) => scoreNumber(row.auditLeadQualityScore || getAudit(row).lead_quality_score) >= 75).length;
+  const avgScore = rows.length ? Math.round(rows.reduce((sum, row) => sum + scoreNumber(row.auditLeadQualityScore || getAudit(row).lead_quality_score), 0) / rows.length) : 0;
+
+  return (
+    <motion.main className="page" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -12 }}>
+      <BackendWakeNotice backendState={backendState} onRetry={onWakeBackend} />
+      <section className="archive-hero">
+        <div>
+          <p className="eyebrow">Outreach</p>
+          <h1>Audited lead queue.</h1>
+          <p className="hero-subcopy">Every audited lead lands here with its opportunity score, next action, pitch angle, and highest-impact website issues.</p>
+        </div>
+        <button onClick={load} disabled={loading}>
+          {loading ? <Loader2 className="spin" size={18} /> : <RefreshCw size={18} />}
+          Refresh
+        </button>
+      </section>
+
+      <section className="archive-stats">
+        <Metric label="Audited" value={rows.length} />
+        <Metric label="Good leads" value={goodCount} tone="hot" />
+        <Metric label="Avg quality" value={avgScore} />
+        <Metric label="Needs action" value={rows.filter((row) => (row.auditNextBestAction || getAudit(row).next_best_action) !== "skip").length} />
+      </section>
+
+      {error && <p className="error-line">{error}</p>}
+      <section className="outreach-list">
+        {sortedRows.map((row) => (
+          <OutreachCard
+            key={row.id}
+            row={row}
+            onAudit={auditLead}
+            auditing={auditingIds.has(row.id)}
+            onDebug={setDebugRow}
+          />
+        ))}
+        {!loading && backendState.status === "ready" && !sortedRows.length && (
+          <div className="empty-state">
+            <Sparkles size={28} />
+            <strong>No audited leads yet</strong>
+            <p>Use the Audit button on Today or All Leads to validate a lead and send it here.</p>
+          </div>
+        )}
       </section>
       <AnimatePresence>
         {debugRow && <DebugPanel row={debugRow} onClose={() => setDebugRow(null)} />}
@@ -1375,6 +1684,7 @@ function App() {
         <nav className="desktop-nav">
           <button className={page === "today" ? "is-selected" : ""} onClick={() => setPage("today")}>Today</button>
           <button className={page === "all" ? "is-selected" : ""} onClick={() => setPage("all")}>All Leads</button>
+          <button className={page === "outreach" ? "is-selected" : ""} onClick={() => setPage("outreach")}>Outreach</button>
           <button className={page === "settings" ? "is-selected" : ""} onClick={() => setPage("settings")}>Settings</button>
         </nav>
       </header>
@@ -1382,6 +1692,7 @@ function App() {
       <AnimatePresence mode="wait">
         {page === "today" && <TodayPage key="today" bootstrap={bootstrap} settings={settings} setSettings={setSettings} backendState={backendState} onWakeBackend={loadBootstrap} />}
         {page === "all" && <AllLeadsPage key="all" settings={settings} backendState={backendState} onWakeBackend={loadBootstrap} />}
+        {page === "outreach" && <OutreachPage key="outreach" backendState={backendState} onWakeBackend={loadBootstrap} />}
         {page === "settings" && <SettingsPage key="settings" settings={settings} setSettings={setSettings} backendState={backendState} onWakeBackend={loadBootstrap} syncState={syncState} onFlushSettings={flushCurrentSettings} effectiveSearch={effectiveSearch} bootstrap={bootstrap} />}
       </AnimatePresence>
 
@@ -1393,6 +1704,10 @@ function App() {
         <button className={page === "all" ? "is-selected" : ""} onClick={() => setPage("all")}>
           <Search size={19} />
           All
+        </button>
+        <button className={page === "outreach" ? "is-selected" : ""} onClick={() => setPage("outreach")}>
+          <Sparkles size={19} />
+          Outreach
         </button>
         <button className={page === "settings" ? "is-selected" : ""} onClick={() => setPage("settings")}>
           <Settings size={19} />

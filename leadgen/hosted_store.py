@@ -175,6 +175,23 @@ def _email_updates_from_row(row: Dict[str, Any]) -> Dict[str, Any]:
     return updates
 
 
+def _audit_updates_from_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    audit = _json_value(row.get("auditResult"))
+    updates = {
+        "audit_result_json": audit,
+        "audit_status": row.get("auditStatus") or None,
+        "audit_website_status": row.get("auditWebsiteStatus") or None,
+        "audit_lead_quality_score": _int(row.get("auditLeadQualityScore")),
+        "audit_website_opportunity_score": _int(row.get("auditWebsiteOpportunityScore")),
+        "audit_outreach_priority": row.get("auditOutreachPriority") or None,
+        "audit_next_best_action": row.get("auditNextBestAction") or None,
+        "audit_recommended_pitch_type": row.get("auditRecommendedPitchType") or None,
+        "audit_recommended_pitch_angle": row.get("auditRecommendedPitchAngle") or None,
+        "audited_at": row.get("auditedAt") or None,
+    }
+    return updates
+
+
 def lead_payload(
     row: Dict[str, Any],
     *,
@@ -207,6 +224,7 @@ def lead_payload(
         "raw_data": row,
     }
     payload.update(_email_updates_from_row(row))
+    payload.update(_audit_updates_from_row(row))
     return payload
 
 
@@ -255,6 +273,16 @@ def to_app_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "emailPagesFetched": row.get("email_pages_fetched") or 0,
         "emailCandidateCount": row.get("email_candidate_count") or 0,
         "emailDebugJson": row.get("email_debug_json") or {},
+        "auditResult": row.get("audit_result_json") or {},
+        "auditStatus": row.get("audit_status") or "",
+        "auditWebsiteStatus": row.get("audit_website_status") or "",
+        "auditLeadQualityScore": row.get("audit_lead_quality_score") or 0,
+        "auditWebsiteOpportunityScore": row.get("audit_website_opportunity_score") or 0,
+        "auditOutreachPriority": row.get("audit_outreach_priority") or "",
+        "auditNextBestAction": row.get("audit_next_best_action") or "",
+        "auditRecommendedPitchType": row.get("audit_recommended_pitch_type") or "",
+        "auditRecommendedPitchAngle": row.get("audit_recommended_pitch_angle") or "",
+        "auditedAt": row.get("audited_at") or "",
         "createdAt": row.get("created_at") or "",
         "updatedAt": row.get("updated_at") or "",
     }
@@ -411,6 +439,20 @@ def list_leads(
     return deduped
 
 
+def list_outreach_leads(limit: int = 500) -> List[Dict[str, Any]]:
+    rows = _request(
+        "GET",
+        "leads",
+        params={
+            "select": "*",
+            "audit_result_json": "not.is.null",
+            "limit": min(max(limit, 1), 1000),
+            "order": "audit_lead_quality_score.desc.nullslast,audited_at.desc",
+        },
+    ) or []
+    return [to_app_row(row) for row in rows]
+
+
 def get_lead(lead_id: str) -> Dict[str, Any]:
     rows = _request("GET", "leads", params={"select": "*", "id": f"eq.{lead_id}", "limit": 1}) or []
     if not rows:
@@ -436,6 +478,16 @@ def update_lead(lead_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
         "emailPagesFetched": "email_pages_fetched",
         "emailCandidateCount": "email_candidate_count",
         "emailDebugJson": "email_debug_json",
+        "auditResult": "audit_result_json",
+        "auditStatus": "audit_status",
+        "auditWebsiteStatus": "audit_website_status",
+        "auditLeadQualityScore": "audit_lead_quality_score",
+        "auditWebsiteOpportunityScore": "audit_website_opportunity_score",
+        "auditOutreachPriority": "audit_outreach_priority",
+        "auditNextBestAction": "audit_next_best_action",
+        "auditRecommendedPitchType": "audit_recommended_pitch_type",
+        "auditRecommendedPitchAngle": "audit_recommended_pitch_angle",
+        "auditedAt": "audited_at",
     }
     payload: Dict[str, Any] = {}
     for app_key, db_key in allowed.items():
@@ -443,6 +495,8 @@ def update_lead(lead_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
             continue
         value = updates[app_key]
         if app_key == "allEmailsJson":
+            value = _json_value(value)
+        if app_key == "auditResult":
             value = _json_value(value)
         if app_key == "tickedAt" and not value:
             value = None

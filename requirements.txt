@@ -4,3 +4,6 @@ fastapi>=0.111.0
 uvicorn[standard]>=0.30.0
 beautifulsoup4>=4.12.3
 openai>=1.88.0
+pandas>=2.2.0
+playwright>=1.45.0
+pydantic>=2.7.0

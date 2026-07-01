@@ -53,6 +53,17 @@ create table if not exists leads (
   updated_at timestamptz not null default now()
 );
 
+alter table leads add column if not exists audit_result_json jsonb;
+alter table leads add column if not exists audit_status text;
+alter table leads add column if not exists audit_website_status text;
+alter table leads add column if not exists audit_lead_quality_score integer;
+alter table leads add column if not exists audit_website_opportunity_score integer;
+alter table leads add column if not exists audit_outreach_priority text;
+alter table leads add column if not exists audit_next_best_action text;
+alter table leads add column if not exists audit_recommended_pitch_type text;
+alter table leads add column if not exists audit_recommended_pitch_angle text;
+alter table leads add column if not exists audited_at timestamptz;
+
 drop index if exists leads_unique_daily_place;
 
 do $$
@@ -78,6 +89,10 @@ create index if not exists leads_search_idx
 on leads using gin (
   to_tsvector('simple', coalesce(name, '') || ' ' || coalesce(address, '') || ' ' || coalesce(search_query, '') || ' ' || coalesce(best_email, ''))
 );
+
+create index if not exists leads_audit_priority_idx
+on leads (audit_lead_quality_score desc nulls last, audited_at desc)
+where audit_result_json is not null;
 
 create table if not exists app_settings (
   key text primary key,

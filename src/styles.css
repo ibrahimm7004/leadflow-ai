@@ -810,6 +810,186 @@ button.dark,
   min-height: 40px;
 }
 
+.audit-action {
+  min-width: 104px;
+}
+
+.outreach-list {
+  display: grid;
+  gap: 12px;
+}
+
+.outreach-card {
+  display: grid;
+  grid-template-columns: minmax(210px, 0.95fr) minmax(210px, 0.8fr) minmax(280px, 1.35fr) minmax(190px, 0.7fr);
+  gap: 14px;
+  align-items: stretch;
+  border: 1px solid rgba(188, 204, 223, 0.9);
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.96), rgba(241, 247, 255, 0.9));
+  box-shadow: 0 18px 48px rgba(18, 35, 58, 0.08);
+  padding: 14px;
+}
+
+.outreach-identity,
+.outreach-visual-column,
+.outreach-insights,
+.outreach-next {
+  min-width: 0;
+}
+
+.outreach-identity h3 {
+  margin: 0 0 8px;
+  color: var(--ink);
+  font-size: 22px;
+  line-height: 1.08;
+}
+
+.outreach-identity p,
+.outreach-insights p,
+.outreach-next small {
+  color: var(--muted);
+  line-height: 1.45;
+  font-weight: 700;
+}
+
+.outreach-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.outreach-links a {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  background: #eef5ff;
+  color: #17477f;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.outreach-visual-column {
+  display: grid;
+  align-content: center;
+  gap: 12px;
+  border: 1px solid rgba(205, 216, 229, 0.9);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.7);
+  padding: 12px;
+}
+
+.satisfaction-wrap {
+  display: grid;
+  gap: 9px;
+}
+
+.satisfaction-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.satisfaction-meta strong {
+  color: var(--ink);
+  font-size: 17px;
+}
+
+.satisfaction-meta span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.satisfaction-bar {
+  height: 14px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e5ebf2;
+  box-shadow: inset 0 1px 2px rgba(20, 32, 45, 0.12);
+}
+
+.satisfaction-bar div {
+  height: 100%;
+  min-width: 4px;
+  border-radius: inherit;
+  transition: width 220ms ease;
+}
+
+.outreach-score-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.outreach-score-grid span {
+  min-height: 48px;
+  display: grid;
+  place-items: center;
+  gap: 3px;
+  border: 1px solid rgba(205, 216, 229, 0.9);
+  border-radius: 8px;
+  background: #f8fbff;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 950;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.outreach-score-grid strong {
+  color: var(--ink);
+  font-size: 18px;
+}
+
+.outreach-insights strong {
+  display: block;
+  color: var(--ink);
+  font-size: 15px;
+  text-transform: capitalize;
+}
+
+.outreach-insights p {
+  margin: 8px 0 10px;
+}
+
+.outreach-insights ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted-strong);
+  font-weight: 760;
+  line-height: 1.45;
+}
+
+.outreach-insights li + li {
+  margin-top: 4px;
+}
+
+.outreach-next {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.outreach-next span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 950;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.outreach-next strong {
+  color: var(--ink);
+  font-size: 18px;
+  line-height: 1.12;
+  text-transform: capitalize;
+}
+
 .page-heading {
   margin-bottom: 16px;
   position: relative;
@@ -1539,7 +1719,7 @@ pre {
     bottom: 12px;
     min-height: 62px;
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(4, 1fr);
     gap: 6px;
     border: 1px solid #d8d2c8;
     border-radius: 8px;
@@ -1636,6 +1816,15 @@ pre {
     margin-left: 56px;
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .outreach-card {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .outreach-insights,
+  .outreach-next {
+    grid-column: 1 / -1;
   }
 
   .lead-actions {
@@ -1769,6 +1958,16 @@ pre {
   .lead-contact-panel a,
   .lead-contact-panel span {
     white-space: normal;
+  }
+
+  .outreach-card,
+  .outreach-score-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .outreach-insights,
+  .outreach-next {
+    grid-column: auto;
   }
 
   .debug-drawer {

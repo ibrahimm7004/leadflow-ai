@@ -4,10 +4,12 @@ import math
 import json
 import os
 import re
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 from zoneinfo import ZoneInfo
 
@@ -61,18 +63,20 @@ from .notifier import send_daily_ready_email
 
 load_project_env()
 
+WEBSITE_AUDITER_DIR = Path(__file__).resolve().parents[1] / "website-auditer"
+if str(WEBSITE_AUDITER_DIR) not in sys.path:
+    sys.path.insert(0, str(WEBSITE_AUDITER_DIR))
+
 
 def _allowed_origins() -> List[str]:
     raw = get_project_env("ALLOWED_ORIGINS")
     if not raw:
         return []
-    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return [origin.strip().rstrip("/") for origin in raw.split(",") if origin.strip()]
 
 
 def _allow_origin_regex() -> Optional[str]:
-    if _allowed_origins():
-        return None
-    return r"http://(localhost|127\.0\.0\.1):\d+"
+    return r"https://([a-z0-9-]+\.)*vercel\.app|http://(localhost|127\.0\.0\.1):\d+"
 
 
 def _scheduler_enabled() -> bool:
@@ -190,6 +194,11 @@ class OneLeadEnrichmentRequest(BaseModel):
     requestTimeoutSeconds: int = Field(default=8, ge=2, le=30)
     businessTimeoutSeconds: int = Field(default=180, ge=5, le=600)
     maxOpenAiCalls: int = Field(default=1, ge=0, le=1)
+    storeResults: bool = True
+
+
+class OneLeadAuditRequest(BaseModel):
+    enableVisualAudit: bool = True
     storeResults: bool = True
 
 
@@ -551,6 +560,58 @@ def _hosted_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=503, detail=str(exc))
 
 
+def _audit_settings(enable_visual_audit: bool) -> Any:
+    from lead_auditor.config import Settings as AuditSettings, load_settings as load_audit_settings
+
+    base = load_audit_settings()
+    api_key = get_project_env("OPENAI_API_KEY").strip() or base.openai_api_key
+    visual_model = get_project_env("OPENAI_VISUAL_MODEL", base.openai_visual_model).strip() or base.openai_visual_model
+    return AuditSettings(
+        **{
+            **base.__dict__,
+            "enable_llm_visual_audit": bool(enable_visual_audit and api_key),
+            "openai_api_key": api_key,
+            "openai_visual_model": visual_model,
+        }
+    )
+
+
+def _audit_input_from_app_row(row: Dict[str, Any]) -> Any:
+    from lead_auditor.models import LeadInput as AuditLeadInput
+
+    return AuditLeadInput(
+        business_name=str(row.get("name") or ""),
+        business_category=str(row.get("businessType") or row.get("searchQuery") or ""),
+        address=str(row.get("address") or ""),
+        phone=str(row.get("phone") or ""),
+        website=str(row.get("websiteUrl") or row.get("externalWebsiteUrl") or row.get("rawWebsiteUri") or ""),
+        google_rating=_safe_float(row.get("rating")) or None,
+        review_count=_safe_int(row.get("userRatingCount")) or None,
+        google_maps_url=str(row.get("googleMapsUri") or ""),
+        email=str(row.get("bestEmail") or ""),
+        email_source=str(row.get("bestEmailSourceUrl") or ""),
+        email_contact_type=str(row.get("bestEmailType") or ""),
+        email_contact_name=str(row.get("contactName") or ""),
+        email_contact_title=str(row.get("contactTitle") or ""),
+        email_recent_activity_signal=str(row.get("emailRecentActivitySignal") or ""),
+    )
+
+
+def _audit_update_payload(result: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "auditResult": result,
+        "auditStatus": result.get("audit_status") or "",
+        "auditWebsiteStatus": result.get("website_status") or "",
+        "auditLeadQualityScore": int(result.get("lead_quality_score") or 0),
+        "auditWebsiteOpportunityScore": int(result.get("website_opportunity_score") or 0),
+        "auditOutreachPriority": result.get("outreach_priority") or "",
+        "auditNextBestAction": result.get("next_best_action") or "",
+        "auditRecommendedPitchType": result.get("recommended_pitch_type") or "",
+        "auditRecommendedPitchAngle": result.get("recommended_pitch_angle") or "",
+        "auditedAt": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @app.get("/api/health")
 def health() -> Dict[str, bool]:
     return {"ok": True}
@@ -659,6 +720,34 @@ def app_update_lead(lead_id: str, payload: LeadUpdateRequest) -> Dict[str, Any]:
         return {"row": row}
     except HostedStoreError as exc:
         raise _hosted_error(exc) from exc
+
+
+@app.get("/api/app/outreach")
+def app_outreach_leads(limit: int = 500) -> Dict[str, Any]:
+    try:
+        return {"rows": hosted_store.list_outreach_leads(limit=limit)}
+    except HostedStoreError as exc:
+        raise _hosted_error(exc) from exc
+
+
+@app.post("/api/app/leads/{lead_id}/audit")
+def app_audit_one_lead(lead_id: str, payload: OneLeadAuditRequest) -> Dict[str, Any]:
+    try:
+        from lead_auditor.main import audit_lead as run_website_audit
+        from lead_auditor.models import model_to_dict as audit_model_to_dict
+
+        row = hosted_store.get_lead(lead_id)
+        audit_input = _audit_input_from_app_row(row)
+        settings = _audit_settings(payload.enableVisualAudit)
+        result = run_website_audit(audit_input, settings)
+        result_data = audit_model_to_dict(result)
+        updates = _audit_update_payload(result_data)
+        stored_row = hosted_store.update_lead(lead_id, updates) if payload.storeResults else row
+        return {"row": stored_row, "audit": result_data}
+    except HostedStoreError as exc:
+        raise _hosted_error(exc) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Website audit failed: {exc}") from exc
 
 
 @app.get("/api/app/settings")
