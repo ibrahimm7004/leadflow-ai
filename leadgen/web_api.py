@@ -4,12 +4,10 @@ import math
 import json
 import os
 import re
-import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 from zoneinfo import ZoneInfo
 
@@ -62,11 +60,6 @@ from .hosted_store import HostedStoreError
 from .notifier import send_daily_ready_email
 
 load_project_env()
-
-WEBSITE_AUDITER_DIR = Path(__file__).resolve().parents[1] / "website-auditer"
-if str(WEBSITE_AUDITER_DIR) not in sys.path:
-    sys.path.insert(0, str(WEBSITE_AUDITER_DIR))
-
 
 def _allowed_origins() -> List[str]:
     raw = get_project_env("ALLOWED_ORIGINS")
@@ -561,7 +554,7 @@ def _hosted_error(exc: Exception) -> HTTPException:
 
 
 def _audit_settings(enable_visual_audit: bool) -> Any:
-    from lead_auditor.config import Settings as AuditSettings, load_settings as load_audit_settings
+    from .website_auditor.config import Settings as AuditSettings, load_settings as load_audit_settings
 
     base = load_audit_settings()
     api_key = get_project_env("OPENAI_API_KEY").strip() or base.openai_api_key
@@ -577,7 +570,7 @@ def _audit_settings(enable_visual_audit: bool) -> Any:
 
 
 def _audit_input_from_app_row(row: Dict[str, Any]) -> Any:
-    from lead_auditor.models import LeadInput as AuditLeadInput
+    from .website_auditor.models import LeadInput as AuditLeadInput
 
     return AuditLeadInput(
         business_name=str(row.get("name") or ""),
@@ -733,8 +726,8 @@ def app_outreach_leads(limit: int = 500) -> Dict[str, Any]:
 @app.post("/api/app/leads/{lead_id}/audit")
 def app_audit_one_lead(lead_id: str, payload: OneLeadAuditRequest) -> Dict[str, Any]:
     try:
-        from lead_auditor.main import audit_lead as run_website_audit
-        from lead_auditor.models import model_to_dict as audit_model_to_dict
+        from .website_auditor.main import audit_lead as run_website_audit
+        from .website_auditor.models import model_to_dict as audit_model_to_dict
 
         row = hosted_store.get_lead(lead_id)
         audit_input = _audit_input_from_app_row(row)
